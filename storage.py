@@ -60,6 +60,14 @@ class StudentPilotStore:
                     conversation_id TEXT PRIMARY KEY, batch_id INTEGER NOT NULL, selected_position INTEGER,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS reminders (
+                    id INTEGER PRIMARY KEY, conversation_id TEXT NOT NULL, user_id TEXT NOT NULL,
+                    item_id INTEGER, title TEXT NOT NULL, remind_at TEXT NOT NULL,
+                    recurrence TEXT, active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reminders_conversation
+                    ON reminders(conversation_id, active);
                 """
             )
 
@@ -191,6 +199,53 @@ class StudentPilotStore:
                 "UPDATE opportunity_context SET selected_position=?, updated_at=? WHERE conversation_id=?",
                 (position, self._now(), conversation_id),
             )
+
+    def create_reminder(self, conversation_id: str, user_id: str, item_id: int | None, title: str, remind_at: str, recurrence: str | None = None) -> None:
+        now = self._now()
+        with self._connection() as connection:
+            connection.execute(
+                """INSERT INTO reminders
+                (conversation_id,user_id,item_id,title,remind_at,recurrence,active,created_at,updated_at)
+                VALUES (?,?,?,?,?,?,1,?,?)""",
+                (conversation_id, user_id, item_id, title, remind_at, recurrence, now, now),
+            )
+
+    def find_reminders(self, conversation_id: str, active_only: bool = True) -> list[dict[str, Any]]:
+        where = "conversation_id=?"
+        params: list[Any] = [conversation_id]
+        if active_only:
+            where += " AND active=1"
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM reminders WHERE {where} ORDER BY remind_at, id",
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_reminders(self, conversation_id: str, query: str, updates: dict[str, Any]) -> int:
+        allowed = {"remind_at", "recurrence", "active", "title"}
+        values = {key: value for key, value in updates.items() if key in allowed and value is not None}
+        if not values:
+            return 0
+        assignments = ", ".join(f"{key}=?" for key in values)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                f"UPDATE reminders SET {assignments}, updated_at=? WHERE conversation_id=? AND active=1 AND lower(title) LIKE ?",
+                (*values.values(), self._now(), conversation_id, f"%{query.lower()}%"),
+            )
+            count = cursor.rowcount
+            cursor.close()
+        return count
+
+    def delete_reminders(self, conversation_id: str, query: str) -> int:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM reminders WHERE conversation_id=? AND lower(title) LIKE ?",
+                (conversation_id, f"%{query.lower()}%"),
+            )
+            count = cursor.rowcount
+            cursor.close()
+        return count
 
     @staticmethod
     def _now() -> str:

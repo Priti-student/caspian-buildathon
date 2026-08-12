@@ -21,9 +21,10 @@
 - [x] Improved relative-date handling (tomorrow, this Friday, in three days, next week, etc.)
 - [x] Clear deadline vs event distinction
 - [x] Tomorrow's routine generation from stored commitments and user input
+- [x] Reminder scheduling and state management (add/list/stop/postpone)
 
 ## Current
 - [ ] Telegram verification of memory and task/event flows
 
 ## Next
-- Reminder scheduling and remaining-deadline alerts
+- Email output integration through Caspian

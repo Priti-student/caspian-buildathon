@@ -4,6 +4,7 @@ from llm_service import FeatherlessLLM
 from opportunity_memory_service import OpportunityMemoryService
 from opportunity_service import OpportunityAnalyzer
 from planning_service import PlanningService
+from reminder_service import ReminderService
 from routine_service import RoutineService
 from storage import StudentPilotStore
 from text_utils import normalize_message
@@ -17,12 +18,15 @@ class StudentPilotService:
         self._opportunities = OpportunityAnalyzer(llm)
         self._opportunity_memory = OpportunityMemoryService(store)
         self._routine = RoutineService(llm, store)
+        self._reminders = ReminderService(llm, store)
 
     def respond(self, conversation_id: str, user_id: str, text: str) -> str:
         try:
             text = normalize_message(text)
             history = self._store.recent_messages(conversation_id, self._history_limit)
             answer = self._routine.handle(conversation_id, user_id, text, history)
+            if answer is None:
+                answer = self._reminders.handle(conversation_id, user_id, text, history)
             if answer is None:
                 answer = self._planner.handle(conversation_id, user_id, text, history)
             if answer is None:

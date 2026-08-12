@@ -6,6 +6,7 @@ from pathlib import Path
 
 from opportunity_memory_service import OpportunityMemoryService
 from planning_service import PlanningService
+from reminder_service import ReminderService
 from routine_service import RoutineService
 from storage import StudentPilotStore
 from studentpilot_service import StudentPilotService
@@ -22,6 +23,8 @@ class FakeLLM:
             return self._plan(text)
         if "one-day schedule" in prompt:
             return self._routine(text)
+        if "reminders" in prompt:
+            return self._reminder(text)
         return self._opportunity(text)
 
     def reply(self, text, history=None):
@@ -69,6 +72,19 @@ class FakeLLM:
             {"start": "15:30", "end": "17:30", "activity": "ML project"},
             {"start": "18:00", "end": "19:00", "activity": "Meeting"},
         ], "needs_more": False}
+
+    @staticmethod
+    def _reminder(text):
+        lower = text.lower()
+        if "stop" in lower:
+            return {"action": "stop", "target": "ML project", "needs_clarification": False}
+        if "postpone" in lower:
+            return {"action": "postpone", "target": "ML project", "remind_at": "2026-08-20 09:00", "needs_clarification": False}
+        if "show" in lower or "what reminders" in lower:
+            return {"action": "list", "needs_clarification": False}
+        if "remind" in lower:
+            return {"action": "add", "target": "ML project", "remind_at": "2026-08-15 09:00", "recurrence": "daily", "needs_clarification": False}
+        return {"action": "none", "needs_clarification": False}
 
 
 class MemoryAndPlanningTests(unittest.TestCase):
@@ -202,6 +218,51 @@ class MemoryAndPlanningTests(unittest.TestCase):
         result = routine.handle("conv-r", "user-r", "Plan my tomorrow: I have college from 9 to 3, and I need to work on my ML project. I also have a meeting at 6 PM.", [])
         self.assertIn("routine", result.lower())
         self.assertIn("College", result)
+
+    def test_reminder_request_detection(self):
+        reminder_markers = [
+            "Remind me about my ML project every day until Friday.",
+            "Remind me tomorrow at 9 AM.",
+            "Stop reminding me about the ML project.",
+            "Show my reminders.",
+            "What reminders do I have?",
+            "Postpone my ML project reminder.",
+        ]
+        for marker in reminder_markers:
+            self.assertTrue(ReminderService._is_reminder_request(marker), marker)
+        self.assertFalse(ReminderService._is_reminder_request("Tell me a joke"))
+
+    def test_reminder_add_list_stop(self):
+        reminders = ReminderService(self.llm, self.store)
+        # Add a reminder for a stored task.
+        self.store.create_item("conv-rem", "user-rem", {"title": "ML project", "item_type": "task", "deadline": "2026-08-14"})
+        result = reminders.handle("conv-rem", "user-rem", "Remind me about my ML project every day until Friday.", [])
+        self.assertIn("Reminder set", result)
+        self.assertEqual(len(self.store.find_reminders("conv-rem")), 1)
+        # List reminders.
+        listed = reminders.handle("conv-rem", "user-rem", "Show my reminders.", [])
+        self.assertIn("ML project", listed)
+        # Stop the reminder.
+        stopped = reminders.handle("conv-rem", "user-rem", "Stop reminding me about the ML project.", [])
+        self.assertEqual(stopped, "Reminder stopped.")
+        self.assertEqual(len(self.store.find_reminders("conv-rem")), 0)
+
+    def test_reminder_postpone(self):
+        reminders = ReminderService(self.llm, self.store)
+        self.store.create_item("conv-rem2", "user-rem2", {"title": "ML project", "item_type": "task", "deadline": "2026-08-14"})
+        reminders.handle("conv-rem2", "user-rem2", "Remind me about my ML project.", [])
+        postponed = reminders.handle("conv-rem2", "user-rem2", "Postpone my ML project reminder.", [])
+        self.assertEqual(postponed, "Reminder postponed.")
+        active = self.store.find_reminders("conv-rem2")
+        self.assertEqual(active[0]["remind_at"], "2026-08-20 09:00")
+
+    def test_reminder_persistence_across_restart(self):
+        reminders = ReminderService(self.llm, self.store)
+        self.store.create_item("conv-rem3", "user-rem3", {"title": "ML project", "item_type": "task", "deadline": "2026-08-14"})
+        reminders.handle("conv-rem3", "user-rem3", "Remind me about my ML project.", [])
+        # Simulate restart: new store on same DB file.
+        store2 = StudentPilotStore(self.db_path)
+        self.assertEqual(len(store2.find_reminders("conv-rem3")), 1)
 
 
 if __name__ == "__main__":
