@@ -105,6 +105,18 @@ class StudentPilotStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def find_items_on(self, conversation_id: str, on_date: str, include_completed: bool = False) -> list[dict[str, Any]]:
+        where = "conversation_id=? AND (event_date=? OR deadline=?)"
+        params: list[Any] = [conversation_id, on_date, on_date]
+        if not include_completed:
+            where += " AND status != 'completed'"
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM planner_items WHERE {where} ORDER BY COALESCE(start_time,'99:99'), id",
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def update_items(self, conversation_id: str, query: str, updates: dict[str, Any]) -> int:
         allowed = {"title", "item_type", "event_date", "start_time", "end_time", "deadline", "priority", "status", "notes", "recurrence"}
         values = {key: value for key, value in updates.items() if key in allowed and value is not None}

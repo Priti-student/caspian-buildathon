@@ -1,10 +1,12 @@
 """SQLite-backed context and planning tests without external services."""
 
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 
 from opportunity_memory_service import OpportunityMemoryService
 from planning_service import PlanningService
+from routine_service import RoutineService
 from storage import StudentPilotStore
 from studentpilot_service import StudentPilotService
 from text_utils import normalize_message
@@ -18,6 +20,8 @@ class FakeLLM:
         self.histories.append(history or [])
         if "tasks and events" in prompt:
             return self._plan(text)
+        if "one-day schedule" in prompt:
+            return self._routine(text)
         return self._opportunity(text)
 
     def reply(self, text, history=None):
@@ -57,6 +61,14 @@ class FakeLLM:
         if "upcoming" in lower:
             return {"action": "list", "needs_clarification": False}
         return {"action": "none", "needs_clarification": False}
+
+    @staticmethod
+    def _routine(text):
+        return {"blocks": [
+            {"start": "09:00", "end": "15:00", "activity": "College"},
+            {"start": "15:30", "end": "17:30", "activity": "ML project"},
+            {"start": "18:00", "end": "19:00", "activity": "Meeting"},
+        ], "needs_more": False}
 
 
 class MemoryAndPlanningTests(unittest.TestCase):
@@ -117,7 +129,6 @@ class MemoryAndPlanningTests(unittest.TestCase):
         self.assertIsNone(planner.handle("c", "u", "Tell me a joke.", history))
 
     def test_relative_date_resolution(self):
-        from datetime import date, timedelta
         today = date.today()
         self.assertEqual(PlanningService._relative_date("tomorrow"), (today + timedelta(days=1)).isoformat())
         self.assertEqual(PlanningService._relative_date("day after tomorrow"), (today + timedelta(days=2)).isoformat())
@@ -160,6 +171,37 @@ class MemoryAndPlanningTests(unittest.TestCase):
         self.assertIsNotNone(meeting["event_date"])
         self.assertIsNone(meeting["deadline"])
         self.assertIn("ML project", planner2.handle("c", "u", "Show upcoming tasks.", history))
+
+    def test_routine_request_detection(self):
+        routine_markers = [
+            "Plan my tomorrow",
+            "Create my routine for tomorrow",
+            "What do I have tomorrow?",
+            "What should I focus on tomorrow?",
+            "Show my schedule for tomorrow",
+            "Plan tomorrow",
+        ]
+        for marker in routine_markers:
+            self.assertTrue(RoutineService._is_routine_request(marker), marker)
+        self.assertFalse(RoutineService._is_routine_request("Tell me a joke"))
+        self.assertFalse(RoutineService._is_routine_request("What is the deadline?"))
+
+    def test_find_items_on_returns_day_commitments(self):
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        self.store.create_item("c", "u", {"title": "Class", "item_type": "class", "event_date": tomorrow, "start_time": "09:00", "end_time": "12:00"})
+        self.store.create_item("c", "u", {"title": "Other day", "item_type": "task", "event_date": (date.today() + timedelta(days=3)).isoformat()})
+        results = self.store.find_items_on("c", tomorrow)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["title"], "Class")
+
+    def test_routine_generation_with_stored_commitments(self):
+        # Store a real commitment for tomorrow, then generate a routine.
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        self.store.create_item("conv-r", "user-r", {"title": "College", "item_type": "class", "event_date": tomorrow, "start_time": "09:00", "end_time": "15:00"})
+        routine = RoutineService(self.llm, self.store)
+        result = routine.handle("conv-r", "user-r", "Plan my tomorrow: I have college from 9 to 3, and I need to work on my ML project. I also have a meeting at 6 PM.", [])
+        self.assertIn("routine", result.lower())
+        self.assertIn("College", result)
 
 
 if __name__ == "__main__":

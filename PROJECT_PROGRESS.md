@@ -20,9 +20,10 @@
 - [x] Isolated test databases (no contamination of real Telegram data)
 - [x] Improved relative-date handling (tomorrow, this Friday, in three days, next week, etc.)
 - [x] Clear deadline vs event distinction
+- [x] Tomorrow's routine generation from stored commitments and user input
 
 ## Current
 - [ ] Telegram verification of memory and task/event flows
 
 ## Next
-- Add timetable generation when requested
+- Reminder scheduling and remaining-deadline alerts
