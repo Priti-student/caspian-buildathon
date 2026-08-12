@@ -1,5 +1,6 @@
 """Application orchestration independent of Caspian and Telegram."""
 
+from email_output_service import EmailOutputService, EmailSender
 from llm_service import FeatherlessLLM
 from opportunity_memory_service import OpportunityMemoryService
 from opportunity_service import OpportunityAnalyzer
@@ -11,7 +12,7 @@ from text_utils import normalize_message
 
 
 class StudentPilotService:
-    def __init__(self, llm: FeatherlessLLM, store: StudentPilotStore, history_limit: int = 16) -> None:
+    def __init__(self, llm: FeatherlessLLM, store: StudentPilotStore, history_limit: int = 16, email_sender: EmailSender | None = None) -> None:
         self._llm, self._store = llm, store
         self._history_limit = history_limit
         self._planner = PlanningService(llm, store)
@@ -19,12 +20,15 @@ class StudentPilotService:
         self._opportunity_memory = OpportunityMemoryService(store)
         self._routine = RoutineService(llm, store)
         self._reminders = ReminderService(llm, store)
+        self._email = EmailOutputService(store, email_sender)
 
     def respond(self, conversation_id: str, user_id: str, text: str) -> str:
         try:
             text = normalize_message(text)
             history = self._store.recent_messages(conversation_id, self._history_limit)
-            answer = self._routine.handle(conversation_id, user_id, text, history)
+            answer = self._email.handle(conversation_id, user_id, text)
+            if answer is None:
+                answer = self._routine.handle(conversation_id, user_id, text, history)
             if answer is None:
                 answer = self._reminders.handle(conversation_id, user_id, text, history)
             if answer is None:

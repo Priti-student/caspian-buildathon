@@ -22,9 +22,10 @@
 - [x] Clear deadline vs event distinction
 - [x] Tomorrow's routine generation from stored commitments and user input
 - [x] Reminder scheduling and state management (add/list/stop/postpone)
+- [x] Email output through Caspian (opportunities/routine/reminders, no inbox reading)
 
 ## Current
 - [ ] Telegram verification of memory and task/event flows
 
 ## Next
-- Email output integration through Caspian
+- None (all phases complete)

@@ -7,7 +7,7 @@ every Caspian channel that is connected below.
 import os
 from pathlib import Path
 
-from caspian_sdk import CommClient
+from caspian_sdk import CommClient, CommError
 from llm_service import FeatherlessLLM
 from storage import StudentPilotStore
 from studentpilot_service import StudentPilotService
@@ -28,10 +28,33 @@ def get_env_setting(name: str) -> str:
     raise RuntimeError(f"Missing required environment variable: {name}")
 
 
+def get_optional_env_setting(name: str, default: str | None = None) -> str | None:
+    """Read an optional setting; returns default instead of raising."""
+    try:
+        return get_env_setting(name)
+    except RuntimeError:
+        return default
+
+
 client = CommClient()
 llm = FeatherlessLLM(api_key=get_env_setting("FEATHERLESS_API_KEY"))
 store = StudentPilotStore()
-studentpilot = StudentPilotService(llm, store)
+
+
+def send_email_via_caspian(recipient: str | None, subject: str, body: str) -> str | None:
+    """Send an email through the connected Caspian email channel (outbound only)."""
+    recipient = recipient or get_optional_env_setting("CASPIAN_EMAIL_RECIPIENT")
+    email_connection_id = get_optional_env_setting("CASPIAN_EMAIL_CONNECTION_ID")
+    if not recipient or not email_connection_id:
+        return None
+    try:
+        client.initiate(email_connection_id, recipient, f"Subject: {subject}\n\n{body}")
+        return f"Email sent to {recipient}."
+    except CommError:
+        return None
+
+
+studentpilot = StudentPilotService(llm, store, email_sender=send_email_via_caspian)
 
 
 def your_agent_logic(text: str, conversation_id: str, user_id: str) -> str:
@@ -51,5 +74,19 @@ def handle(message):
 if __name__ == "__main__":
     telegram = client.connect_telegram(bot_token=get_env_setting("TELEGRAM_BOT_TOKEN"))
     print(f"Telegram bot connected: {telegram['address']}")
+    # Optionally connect an email mailbox for outbound-only email output.
+    if get_optional_env_setting("CASPIAN_EMAIL_CONNECTION_ID") is None:
+        email_settings = {
+            "customer_id": get_optional_env_setting("CASPIAN_EMAIL_CUSTOMER_ID"),
+            "agent_id": get_optional_env_setting("CASPIAN_EMAIL_AGENT_ID"),
+            "username": get_optional_env_setting("CASPIAN_EMAIL_USERNAME"),
+        }
+        optional = {key: value for key, value in email_settings.items() if value}
+        if optional:
+            try:
+                email = client.connect_email(**optional)
+                print(f"Email connected: {email['address']}")
+            except CommError as error:
+                print(f"Email connection skipped: {error}")
     # `client.behavior_prompt()` can be appended to your agent's system prompt.
     client.listen()

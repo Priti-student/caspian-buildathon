@@ -4,6 +4,7 @@ import unittest
 from datetime import date, timedelta
 from pathlib import Path
 
+from email_output_service import EmailOutputService
 from opportunity_memory_service import OpportunityMemoryService
 from planning_service import PlanningService
 from reminder_service import ReminderService
@@ -263,6 +264,47 @@ class MemoryAndPlanningTests(unittest.TestCase):
         # Simulate restart: new store on same DB file.
         store2 = StudentPilotStore(self.db_path)
         self.assertEqual(len(store2.find_reminders("conv-rem3")), 1)
+
+    def test_email_request_classification(self):
+        self.assertEqual(EmailOutputService._classify("email me the opportunities"), ("opportunities", None))
+        self.assertEqual(EmailOutputService._classify("send tomorrow's routine to my email"), ("routine", None))
+        self.assertEqual(EmailOutputService._classify("email me my reminders"), ("reminders", None))
+        self.assertEqual(EmailOutputService._classify("email me the opportunities to priya@example.com"), ("opportunities", "priya@example.com"))
+        self.assertIsNone(EmailOutputService._classify("tell me a story")[0])
+
+    def test_email_opportunities_uses_persisted_memory(self):
+        # First, store opportunities through the real pipeline.
+        self.app.respond("conv-email", "user-email", "Here are three fictional internship opportunities: A, B, C. Analyze them.")
+        captured = {}
+        email = EmailOutputService(self.store, sender=lambda recipient, subject, body: captured.update(
+            {"recipient": recipient, "subject": subject, "body": body}) or "Email sent.")
+        result = email.handle("conv-email", "user-email", "email me the opportunities to priya@example.com")
+        self.assertEqual(result, "Email sent.")
+        self.assertEqual(captured["recipient"], "priya@example.com")
+        self.assertIn("Opportunity A", captured["body"])
+        self.assertIn("Opportunity summary", captured["subject"])
+
+    def test_email_routine_and_reminders_content(self):
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        self.store.create_item("conv-em2", "user-em2", {"title": "College", "item_type": "class", "event_date": tomorrow, "start_time": "09:00", "end_time": "15:00"})
+        self.store.create_reminder("conv-em2", "user-em2", None, "ML project", "2026-08-20 09:00")
+        email = EmailOutputService(self.store, sender=lambda recipient, subject, body: "Email sent.")
+        routine_result = email.handle("conv-em2", "user-em2", "send tomorrow's routine to my email")
+        self.assertEqual(routine_result, "Email sent.")
+        reminders_result = email.handle("conv-em2", "user-em2", "email me my reminders")
+        self.assertEqual(reminders_result, "Email sent.")
+
+    def test_email_without_sender_prepares_content(self):
+        # When no sender is wired (e.g., in tests), the content is returned for inspection.
+        self.app.respond("conv-em3", "user-em3", "Here are three fictional internship opportunities: A, B, C. Analyze them.")
+        email = EmailOutputService(self.store)  # no sender
+        result = email.handle("conv-em3", "user-em3", "email me the opportunities")
+        self.assertIn("Email sending isn't configured yet", result)
+        self.assertIn("Opportunity A", result)
+
+    def test_email_non_request_is_not_intercepted(self):
+        email = EmailOutputService(self.store, sender=lambda recipient, subject, body: "Email sent.")
+        self.assertIsNone(email.handle("conv-em4", "user-em4", "What is the deadline for opportunity B?"))
 
 
 if __name__ == "__main__":
