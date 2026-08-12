@@ -14,6 +14,12 @@
 - [x] SQLite task and event storage
 - [x] Natural-language task and event extraction
 - [x] Task and event retrieval and management
+- [x] Persistent opportunity memory (separate from task/event memory)
+- [x] Ordinal opportunity follow-ups (best/second/third/deadline/compare)
+- [x] Repeated-punctuation normalization for intent detection
+- [x] Isolated test databases (no contamination of real Telegram data)
+- [x] Improved relative-date handling (tomorrow, this Friday, in three days, next week, etc.)
+- [x] Clear deadline vs event distinction
 
 ## Current
 - [ ] Telegram verification of memory and task/event flows

@@ -88,6 +88,10 @@ class OpportunityAnalyzer:
             opportunities = opportunities[:requested_top_n]
         return self._format(opportunities)
 
+    def format(self, opportunities: list[Opportunity]) -> str:
+        """Render already-extracted opportunities for display."""
+        return self._format(opportunities)
+
     def extract(
         self, text: str, history: list[dict[str, str]] | None = None
     ) -> tuple[list[Opportunity], int | None] | None:

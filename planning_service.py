@@ -11,7 +11,7 @@ from storage import StudentPilotStore
 PLANNING_PROMPT = """You extract and manage a student's tasks and events. Return ONLY JSON.
 Today is {today}. Resolve unambiguous relative dates to ISO YYYY-MM-DD. If a date/time is genuinely ambiguous, set needs_clarification true and do not add/update/delete anything.
 Schema: {{"action":"add|list|query|update|delete|complete|none","target":"string or null","items":[{{"title":"string","item_type":"task|deadline|meeting|class|interview|personal event|other","event_date":"YYYY-MM-DD or null","start_time":"HH:MM or null","end_time":"HH:MM or null","deadline":"YYYY-MM-DD or null","priority":"high|medium|low or null","notes":"string or null","recurrence":"string or null"}}],"updates":{{"field":"value"}},"needs_clarification":false,"clarification":"string or null"}}
-Rules: detect only commitments the user wants remembered or management requests. A due task has title/item_type task and its due date in deadline, not event_date. Never invent missing details. For unrelated messages use action none."""
+Rules: detect only commitments the user wants remembered or management requests. A due task has title/item_type task and its due date in deadline, not event_date. An event has its date in event_date. Never invent missing details. For unrelated messages use action none."""
 
 
 class PlanningService:
@@ -66,29 +66,64 @@ class PlanningService:
         result["item_type"] = result["item_type"] if result["item_type"] in {"task", "deadline", "meeting", "class", "interview", "personal event", "other"} else "other"
         relative_date = PlanningService._relative_date(source_text)
         if relative_date:
-            if re.search(r"\b(due|deadline|before)\b", source_text, re.IGNORECASE):
+            if PlanningService._is_deadline(source_text):
                 result["deadline"] = relative_date
             else:
                 result["event_date"] = relative_date
         return result
 
     @staticmethod
-    def _relative_date(text: str) -> str | None:
+    def _is_deadline(text: str) -> bool:
+        """Detect deadline semantics: due/by/before/submit/finish/complete."""
         lower = text.lower()
+        if re.search(r"\b(due|deadline|before|by|submit|finish)\b", lower):
+            return True
+        return bool(re.search(r"\bcomplete\b.*\bby\b", lower))
+
+    @staticmethod
+    def _relative_date(text: str) -> str | None:
+        """Resolve common relative date phrases to an ISO date."""
+        lower = re.sub(r"\s+", " ", text.lower()).strip()
         today = date.today()
-        if "day after tomorrow" in lower:
+
+        if re.search(r"\bday after tomorrow\b", lower):
             return (today + timedelta(days=2)).isoformat()
-        if "tomorrow" in lower:
+        if re.search(r"\btomorrow\b", lower):
             return (today + timedelta(days=1)).isoformat()
+        if re.search(r"\b(today|tonight|this evening)\b", lower):
+            return today.isoformat()
+
+        # "in three days", "in 3 days", "in a week", "in 2 weeks"
+        number_words = {
+            "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+            "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+        }
+        match = re.search(r"\bin\s+(?:about\s+)?(?:an?\s+)?(\d+|[a-z]+)\s+(day|week)s?\b", lower)
+        if match:
+            amount_text, unit = match.group(1), match.group(2)
+            amount = int(amount_text) if amount_text.isdigit() else number_words.get(amount_text)
+            if amount:
+                days = amount * 7 if unit == "week" else amount
+                return (today + timedelta(days=days)).isoformat()
+        if re.search(r"\bin\s+an?\s+(day|week)\b", lower):
+            unit = re.search(r"\bin\s+an?\s+(day|week)\b", lower).group(1)
+            days = 7 if unit == "week" else 1
+            return (today + timedelta(days=days)).isoformat()
+
+        if re.search(r"\bnext week\b", lower):
+            return (today + timedelta(days=7)).isoformat()
+
         weekdays = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}
-        match = re.search(r"\b(next\s+)?(" + "|".join(weekdays) + r")\b", lower)
-        if not match:
-            return None
-        target = weekdays[match.group(2)]
-        days = (target - today.weekday()) % 7
-        if match.group(1):
-            days = days or 7
-        return (today + timedelta(days=days)).isoformat()
+        match = re.search(r"\b(this|next)\s+(" + "|".join(weekdays) + r")\b", lower)
+        if match:
+            prefix, weekday = match.group(1), match.group(2)
+            target = weekdays[weekday]
+            days = (target - today.weekday()) % 7
+            if prefix == "next" and days <= 2:
+                # "next Monday" said on Sunday means the Monday after tomorrow's Monday.
+                days += 7
+            return (today + timedelta(days=days)).isoformat()
+        return None
 
     @staticmethod
     def _format_items(items: list[dict[str, Any]]) -> str:

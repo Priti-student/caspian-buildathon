@@ -40,7 +40,12 @@ class OpportunityMemoryService:
         markers = ("best", "top", "compare", "first", "second", "third", "fourth", "fifth",
                    "previous opportunity", "this opportunity", "that opportunity", "this one", "that one",
                    "its deadline", "more about", "what about")
-        return any(marker in text for marker in markers)
+        if not any(marker in text for marker in markers):
+            return False
+        # A new opportunity submission should be analyzed, not treated as a follow-up.
+        submission_markers = ("internship", "job", "hackathon", "scholarship", "competition",
+                              "workshop", "apply", "hiring", "opportunity:", "opportunities:")
+        return not any(marker in text for marker in submission_markers)
 
     @staticmethod
     def _positions(text: str, items: list[dict]) -> list[int]:
