@@ -34,6 +34,11 @@ class FakeLLM:
 
     @staticmethod
     def _opportunity(text):
+        lower = text.lower()
+        # Only treat explicit opportunity submissions as opportunities; follow-ups
+        # and unrelated messages must NOT be re-analyzed as new opportunities.
+        if not any(word in lower for word in ("opportunit", "internship", "job", "scholarship", "hackathon", "analyze")):
+            return {"is_opportunity": False, "requested_top_n": None, "opportunities": [], "message": "Not an opportunity."}
         titles = ["Opportunity A", "Opportunity B", "Opportunity C"]
         return {"is_opportunity": True, "requested_top_n": None, "opportunities": [
             {"rank": i + 1, "title": title, "organization": "Example Org", "category": "Internship",
@@ -305,6 +310,51 @@ class MemoryAndPlanningTests(unittest.TestCase):
     def test_email_non_request_is_not_intercepted(self):
         email = EmailOutputService(self.store, sender=lambda recipient, subject, body: "Email sent.")
         self.assertIsNone(email.handle("conv-em4", "user-em4", "What is the deadline for opportunity B?"))
+
+    def test_full_pipeline_integration_and_multi_user_isolation(self):
+        """One coherent conversation exercising every feature, plus isolation from another user."""
+        conv_a = "conv-a"
+        user_a = "user-a"
+
+        # 1. Save a task with a deadline.
+        self.app.respond(conv_a, user_a, "My ML project is due Friday.")
+        # 2. Save an event for tomorrow.
+        self.app.respond(conv_a, user_a, "I have a meeting tomorrow at 4 PM.")
+        # 3. Submit multiple opportunities.
+        self.app.respond(conv_a, user_a, "Here are three fictional internship opportunities: A, B, C. Analyze them.")
+        # 4. Follow-up: best opportunity (rank 1 = Opportunity A).
+        self.assertIn("Opportunity A", self.app.respond(conv_a, user_a, "Which one is best?"))
+        # 5. Follow-up: second opportunity details.
+        self.assertIn("Opportunity B", self.app.respond(conv_a, user_a, "Tell me more about the second one."))
+        # 6. Follow-up: deadline of selected opportunity.
+        self.assertIn("2026-08-30", self.app.respond(conv_a, user_a, "What is its deadline?"))
+        # 7. Follow-up: compare first and third.
+        self.assertIn("Opportunity C", self.app.respond(conv_a, user_a, "Compare the first and third ones."))
+        # 8. Repeated punctuation still works.
+        self.assertIn("Opportunity A", self.app.respond(conv_a, user_a, "Which one is best???"))
+        # 9. Reminder for the stored task.
+        self.assertIn("Reminder set", self.app.respond(conv_a, user_a, "Remind me about my ML project."))
+        # 10. Routine request for tomorrow (uses stored meeting).
+        routine_reply = self.app.respond(conv_a, user_a, "Plan my tomorrow.")
+        self.assertIn("routine", routine_reply.lower())
+        # 11. Email output request (no sender wired in tests → content prepared).
+        email_reply = self.app.respond(conv_a, user_a, "email me the opportunities")
+        self.assertIn("Opportunity A", email_reply)
+
+        # --- User B: completely isolated ---
+        conv_b = "conv-b"
+        user_b = "user-b"
+        self.app.respond(conv_b, user_b, "Hello")
+        # User B has no opportunities, tasks, or reminders from User A.
+        self.assertEqual(self.store.latest_opportunities(conv_b), [])
+        self.assertEqual(self.store.find_items(conv_b), [])
+        self.assertEqual(self.store.find_reminders(conv_b), [])
+        # User B's follow-up falls through to the generic LLM, not User A's memory.
+        self.assertEqual(self.app.respond(conv_b, user_b, "Which one is best?"), "General response")
+        # User A's data is still intact.
+        self.assertEqual(len(self.store.latest_opportunities(conv_a)), 3)
+        self.assertEqual(len(self.store.find_items(conv_a)), 2)
+        self.assertEqual(len(self.store.find_reminders(conv_a)), 1)
 
 
 if __name__ == "__main__":
