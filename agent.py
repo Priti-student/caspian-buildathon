@@ -36,6 +36,22 @@ def get_optional_env_setting(name: str, default: str | None = None) -> str | Non
         return default
 
 
+def set_env_setting(name: str, value: str) -> None:
+    """Persist a setting to the local .env file (idempotent)."""
+    env_path = Path(__file__).with_name(".env")
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    found = False
+    for index, line in enumerate(lines):
+        key, separator, _ = line.partition("=")
+        if separator and key.strip() == name:
+            lines[index] = f"{name}={value}"
+            found = True
+            break
+    if not found:
+        lines.append(f"{name}={value}")
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 client = CommClient()
 llm = FeatherlessLLM(api_key=get_env_setting("FEATHERLESS_API_KEY"))
 store = StudentPilotStore()
@@ -86,6 +102,10 @@ if __name__ == "__main__":
             try:
                 email = client.connect_email(**optional)
                 print(f"Email connected: {email['address']}")
+                connection_id = email.get("id")
+                if connection_id:
+                    set_env_setting("CASPIAN_EMAIL_CONNECTION_ID", str(connection_id))
+                    print(f"Email connection id saved: {connection_id}")
             except CommError as error:
                 print(f"Email connection skipped: {error}")
     # `client.behavior_prompt()` can be appended to your agent's system prompt.
