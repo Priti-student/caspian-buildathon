@@ -37,20 +37,20 @@ class ReminderService:
             clarification = result.get("clarification")
             return clarification if isinstance(clarification, str) else "Could you clarify the reminder details?"
         if action == "list":
-            return self._list_reminders(conversation_id)
+            return self._list_reminders(user_id)
         target = result.get("target")
         if not isinstance(target, str) or not target.strip():
             return "Which task or event should I remind you about?"
         if action == "add":
             return self._add_reminder(conversation_id, user_id, target, result)
         if action == "stop":
-            count = self._store.update_reminders(conversation_id, target, {"active": 0})
+            count = self._store.update_reminders(user_id, target, {"active": 0})
             return "Reminder stopped." if count else "I couldn't find an active reminder for that."
         if action == "postpone":
             remind_at = result.get("remind_at")
             if not remind_at:
                 return "When should I remind you instead?"
-            count = self._store.update_reminders(conversation_id, target, {"remind_at": remind_at})
+            count = self._store.update_reminders(user_id, target, {"remind_at": remind_at})
             return "Reminder postponed." if count else "I couldn't find an active reminder for that."
         return None
 
@@ -61,7 +61,7 @@ class ReminderService:
         return any(marker in lower for marker in markers)
 
     def _add_reminder(self, conversation_id: str, user_id: str, target: str, result: dict[str, Any]) -> str:
-        items = self._store.find_items(conversation_id, target)
+        items = self._store.find_items(user_id, target)
         item_id = items[0]["id"] if items else None
         remind_at = result.get("remind_at") or self._default_remind_at()
         recurrence = result.get("recurrence")
@@ -70,8 +70,8 @@ class ReminderService:
         self._store.create_reminder(conversation_id, user_id, item_id, target, remind_at, recurrence)
         return f"Reminder set for {target} at {remind_at}."
 
-    def _list_reminders(self, conversation_id: str) -> str:
-        reminders = self._store.find_reminders(conversation_id)
+    def _list_reminders(self, user_id: str) -> str:
+        reminders = self._store.find_reminders(user_id)
         if not reminders:
             return "You have no active reminders."
         lines = ["Your reminders:"]

@@ -9,8 +9,8 @@ class OpportunityMemoryService:
     def __init__(self, store: StudentPilotStore) -> None:
         self._store = store
 
-    def handle_followup(self, conversation_id: str, text: str) -> str | None:
-        items = self._store.latest_opportunities(conversation_id)
+    def handle_followup(self, user_id: str, text: str) -> str | None:
+        items = self._store.latest_opportunities(user_id)
         lower = text.lower()
         if not items or not self._is_followup(lower):
             return None
@@ -25,11 +25,11 @@ class OpportunityMemoryService:
             chosen = sorted(items, key=lambda item: (item["rank"], -item["relevance_score"]))[:limit]
             return self._list(chosen)
         position = self._positions(lower, items)
-        selected = position[0] if position else self._store.selected_opportunity_position(conversation_id)
+        selected = position[0] if position else self._store.selected_opportunity_position(user_id)
         if selected is None:
             selected = 1
         selected = min(max(selected, 1), len(items))
-        self._store.select_opportunity(conversation_id, selected)
+        self._store.select_opportunity(user_id, selected)
         item = items[selected - 1]
         if "deadline" in lower or "due" in lower:
             return f"{item['title']} deadline: {item['deadline']}."

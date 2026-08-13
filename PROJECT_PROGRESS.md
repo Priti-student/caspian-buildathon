@@ -24,6 +24,8 @@
 - [x] Reminder scheduling and state management (add/list/stop/postpone)
 - [x] Email output through Caspian (opportunities/routine/reminders, no inbox reading)
 - [x] Full-pipeline integration test with multi-user isolation
+- [x] Cross-channel identity linking (Telegram + email via OTP)
+- [x] User-scoped shared memory (opportunities/tasks/reminders) across channels
 
 ## Current
 - [ ] Telegram verification of memory and task/event flows

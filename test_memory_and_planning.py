@@ -1,10 +1,11 @@
-"""SQLite-backed context and planning tests without external services."""
+"""SQLite-backed context, planning, and cross-channel identity tests without external services."""
 
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
 
 from email_output_service import EmailOutputService
+from identity_service import IdentityService
 from opportunity_memory_service import OpportunityMemoryService
 from planning_service import PlanningService
 from reminder_service import ReminderService
@@ -35,8 +36,6 @@ class FakeLLM:
     @staticmethod
     def _opportunity(text):
         lower = text.lower()
-        # Only treat explicit opportunity submissions as opportunities; follow-ups
-        # and unrelated messages must NOT be re-analyzed as new opportunities.
         if not any(word in lower for word in ("opportunit", "internship", "job", "scholarship", "hackathon", "analyze")):
             return {"is_opportunity": False, "requested_top_n": None, "opportunities": [], "message": "Not an opportunity."}
         titles = ["Opportunity A", "Opportunity B", "Opportunity C"]
@@ -107,7 +106,6 @@ class MemoryAndPlanningTests(unittest.TestCase):
     def test_followup_context_and_isolation(self):
         conversation = "student-1"
         self.app.respond(conversation, "user-1", "Here are three fictional internship opportunities: A, B, C. Analyze them.")
-        # Best-ranked opportunity is rank 1 (Opportunity A).
         self.assertIn("Opportunity A", self.app.respond(conversation, "user-1", "Which one is best?"))
         self.assertIn("Opportunity B", self.app.respond(conversation, "user-1", "Tell me more about the second one."))
         self.assertIn("2026-08-30", self.app.respond(conversation, "user-1", "What is its deadline?"))
@@ -119,11 +117,9 @@ class MemoryAndPlanningTests(unittest.TestCase):
     def test_opportunity_memory_is_persistent_and_separate_from_tasks(self):
         conversation = "student-3"
         self.app.respond(conversation, "user-3", "Here are three fictional internship opportunities: A, B, C. Analyze them.")
-        # Opportunities are stored persistently and retrievable via ordinal follow-ups.
         self.assertIn("Opportunity B", self.app.respond(conversation, "user-3", "Tell me more about the second one."))
         self.assertIn("Opportunity C", self.app.respond(conversation, "user-3", "What about the third one?"))
-        # Task/event memory is separate: no planner items were created by opportunity messages.
-        self.assertEqual(self.store.find_items(conversation), [])
+        self.assertEqual(self.store.find_items("user-3"), [])
 
     def test_repeated_punctuation_does_not_break_intent_detection(self):
         conversation = "student-4"
@@ -159,11 +155,9 @@ class MemoryAndPlanningTests(unittest.TestCase):
         self.assertEqual(PlanningService._relative_date("in a week"), (today + timedelta(days=7)).isoformat())
         self.assertEqual(PlanningService._relative_date("today"), today.isoformat())
         self.assertEqual(PlanningService._relative_date("next week"), (today + timedelta(days=7)).isoformat())
-        # "this Friday" resolves to the upcoming Friday (or today if today is Friday).
         friday_delta = (4 - today.weekday()) % 7
         self.assertEqual(PlanningService._relative_date("this Friday"), (today + timedelta(days=friday_delta)).isoformat())
-        # "next Monday" said on Sunday should be 8 days out, not 1.
-        if today.weekday() == 6:  # Sunday
+        if today.weekday() == 6:
             self.assertEqual(PlanningService._relative_date("next Monday"), (today + timedelta(days=8)).isoformat())
         self.assertIsNone(PlanningService._relative_date("no date here"))
 
@@ -178,12 +172,12 @@ class MemoryAndPlanningTests(unittest.TestCase):
     def test_task_event_persistence_across_restart(self):
         planner = PlanningService(self.llm, self.store)
         history = []
-        planner.handle("c", "u", "My ML project is due Friday.", history)
-        planner.handle("c", "u", "I have a meeting tomorrow at 4 PM.", history)
-        # Simulate an application restart: new store/service instances on the same DB file.
+        canonical = self.store.resolve_user_id("telegram", "tg-persist-task")
+        planner.handle("c", canonical, "My ML project is due Friday.", history)
+        planner.handle("c", canonical, "I have a meeting tomorrow at 4 PM.", history)
         store2 = StudentPilotStore(self.db_path)
         planner2 = PlanningService(FakeLLM(), store2)
-        items = store2.find_items("c")
+        items = store2.find_items(canonical)
         self.assertEqual(len(items), 2)
         ml = next(item for item in items if "ML project" in item["title"])
         meeting = next(item for item in items if "meeting" in item["title"].lower())
@@ -192,7 +186,7 @@ class MemoryAndPlanningTests(unittest.TestCase):
         self.assertEqual(meeting["item_type"], "meeting")
         self.assertIsNotNone(meeting["event_date"])
         self.assertIsNone(meeting["deadline"])
-        self.assertIn("ML project", planner2.handle("c", "u", "Show upcoming tasks.", history))
+        self.assertIn("ML project", planner2.handle("c", canonical, "Show upcoming tasks.", history))
 
     def test_routine_request_detection(self):
         routine_markers = [
@@ -212,12 +206,11 @@ class MemoryAndPlanningTests(unittest.TestCase):
         tomorrow = (date.today() + timedelta(days=1)).isoformat()
         self.store.create_item("c", "u", {"title": "Class", "item_type": "class", "event_date": tomorrow, "start_time": "09:00", "end_time": "12:00"})
         self.store.create_item("c", "u", {"title": "Other day", "item_type": "task", "event_date": (date.today() + timedelta(days=3)).isoformat()})
-        results = self.store.find_items_on("c", tomorrow)
+        results = self.store.find_items_on("u", tomorrow)
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["title"], "Class")
 
     def test_routine_generation_with_stored_commitments(self):
-        # Store a real commitment for tomorrow, then generate a routine.
         tomorrow = (date.today() + timedelta(days=1)).isoformat()
         self.store.create_item("conv-r", "user-r", {"title": "College", "item_type": "class", "event_date": tomorrow, "start_time": "09:00", "end_time": "15:00"})
         routine = RoutineService(self.llm, self.store)
@@ -240,18 +233,15 @@ class MemoryAndPlanningTests(unittest.TestCase):
 
     def test_reminder_add_list_stop(self):
         reminders = ReminderService(self.llm, self.store)
-        # Add a reminder for a stored task.
         self.store.create_item("conv-rem", "user-rem", {"title": "ML project", "item_type": "task", "deadline": "2026-08-14"})
         result = reminders.handle("conv-rem", "user-rem", "Remind me about my ML project every day until Friday.", [])
         self.assertIn("Reminder set", result)
-        self.assertEqual(len(self.store.find_reminders("conv-rem")), 1)
-        # List reminders.
+        self.assertEqual(len(self.store.find_reminders("user-rem")), 1)
         listed = reminders.handle("conv-rem", "user-rem", "Show my reminders.", [])
         self.assertIn("ML project", listed)
-        # Stop the reminder.
         stopped = reminders.handle("conv-rem", "user-rem", "Stop reminding me about the ML project.", [])
         self.assertEqual(stopped, "Reminder stopped.")
-        self.assertEqual(len(self.store.find_reminders("conv-rem")), 0)
+        self.assertEqual(len(self.store.find_reminders("user-rem")), 0)
 
     def test_reminder_postpone(self):
         reminders = ReminderService(self.llm, self.store)
@@ -259,16 +249,15 @@ class MemoryAndPlanningTests(unittest.TestCase):
         reminders.handle("conv-rem2", "user-rem2", "Remind me about my ML project.", [])
         postponed = reminders.handle("conv-rem2", "user-rem2", "Postpone my ML project reminder.", [])
         self.assertEqual(postponed, "Reminder postponed.")
-        active = self.store.find_reminders("conv-rem2")
+        active = self.store.find_reminders("user-rem2")
         self.assertEqual(active[0]["remind_at"], "2026-08-20 09:00")
 
     def test_reminder_persistence_across_restart(self):
         reminders = ReminderService(self.llm, self.store)
         self.store.create_item("conv-rem3", "user-rem3", {"title": "ML project", "item_type": "task", "deadline": "2026-08-14"})
         reminders.handle("conv-rem3", "user-rem3", "Remind me about my ML project.", [])
-        # Simulate restart: new store on same DB file.
         store2 = StudentPilotStore(self.db_path)
-        self.assertEqual(len(store2.find_reminders("conv-rem3")), 1)
+        self.assertEqual(len(store2.find_reminders("user-rem3")), 1)
 
     def test_email_request_classification(self):
         self.assertEqual(EmailOutputService._classify("email me the opportunities"), ("opportunities", None))
@@ -278,7 +267,6 @@ class MemoryAndPlanningTests(unittest.TestCase):
         self.assertIsNone(EmailOutputService._classify("tell me a story")[0])
 
     def test_email_opportunities_uses_persisted_memory(self):
-        # First, store opportunities through the real pipeline.
         self.app.respond("conv-email", "user-email", "Here are three fictional internship opportunities: A, B, C. Analyze them.")
         captured = {}
         email = EmailOutputService(self.store, sender=lambda recipient, subject, body: captured.update(
@@ -300,9 +288,8 @@ class MemoryAndPlanningTests(unittest.TestCase):
         self.assertEqual(reminders_result, "Email sent.")
 
     def test_email_without_sender_prepares_content(self):
-        # When no sender is wired (e.g., in tests), the content is returned for inspection.
         self.app.respond("conv-em3", "user-em3", "Here are three fictional internship opportunities: A, B, C. Analyze them.")
-        email = EmailOutputService(self.store)  # no sender
+        email = EmailOutputService(self.store)
         result = email.handle("conv-em3", "user-em3", "email me the opportunities")
         self.assertIn("Email sending isn't configured yet", result)
         self.assertIn("Opportunity A", result)
@@ -312,49 +299,136 @@ class MemoryAndPlanningTests(unittest.TestCase):
         self.assertIsNone(email.handle("conv-em4", "user-em4", "What is the deadline for opportunity B?"))
 
     def test_full_pipeline_integration_and_multi_user_isolation(self):
-        """One coherent conversation exercising every feature, plus isolation from another user."""
         conv_a = "conv-a"
         user_a = "user-a"
-
-        # 1. Save a task with a deadline.
         self.app.respond(conv_a, user_a, "My ML project is due Friday.")
-        # 2. Save an event for tomorrow.
         self.app.respond(conv_a, user_a, "I have a meeting tomorrow at 4 PM.")
-        # 3. Submit multiple opportunities.
         self.app.respond(conv_a, user_a, "Here are three fictional internship opportunities: A, B, C. Analyze them.")
-        # 4. Follow-up: best opportunity (rank 1 = Opportunity A).
         self.assertIn("Opportunity A", self.app.respond(conv_a, user_a, "Which one is best?"))
-        # 5. Follow-up: second opportunity details.
         self.assertIn("Opportunity B", self.app.respond(conv_a, user_a, "Tell me more about the second one."))
-        # 6. Follow-up: deadline of selected opportunity.
         self.assertIn("2026-08-30", self.app.respond(conv_a, user_a, "What is its deadline?"))
-        # 7. Follow-up: compare first and third.
         self.assertIn("Opportunity C", self.app.respond(conv_a, user_a, "Compare the first and third ones."))
-        # 8. Repeated punctuation still works.
         self.assertIn("Opportunity A", self.app.respond(conv_a, user_a, "Which one is best???"))
-        # 9. Reminder for the stored task.
         self.assertIn("Reminder set", self.app.respond(conv_a, user_a, "Remind me about my ML project."))
-        # 10. Routine request for tomorrow (uses stored meeting).
         routine_reply = self.app.respond(conv_a, user_a, "Plan my tomorrow.")
         self.assertIn("routine", routine_reply.lower())
-        # 11. Email output request (no sender wired in tests → content prepared).
         email_reply = self.app.respond(conv_a, user_a, "email me the opportunities")
         self.assertIn("Opportunity A", email_reply)
 
-        # --- User B: completely isolated ---
         conv_b = "conv-b"
         user_b = "user-b"
         self.app.respond(conv_b, user_b, "Hello")
-        # User B has no opportunities, tasks, or reminders from User A.
-        self.assertEqual(self.store.latest_opportunities(conv_b), [])
-        self.assertEqual(self.store.find_items(conv_b), [])
-        self.assertEqual(self.store.find_reminders(conv_b), [])
-        # User B's follow-up falls through to the generic LLM, not User A's memory.
+        self.assertEqual(self.store.latest_opportunities(user_b), [])
+        self.assertEqual(self.store.find_items(user_b), [])
+        self.assertEqual(self.store.find_reminders(user_b), [])
         self.assertEqual(self.app.respond(conv_b, user_b, "Which one is best?"), "General response")
-        # User A's data is still intact.
-        self.assertEqual(len(self.store.latest_opportunities(conv_a)), 3)
-        self.assertEqual(len(self.store.find_items(conv_a)), 2)
-        self.assertEqual(len(self.store.find_reminders(conv_a)), 1)
+        self.assertEqual(len(self.store.latest_opportunities(user_a)), 3)
+        self.assertEqual(len(self.store.find_items(user_a)), 2)
+        self.assertEqual(len(self.store.find_reminders(user_a)), 1)
+
+    # ── Cross-channel identity tests ─────────────────────────────────────────
+
+    def test_identity_resolution_and_linking(self):
+        telegram_user = self.store.resolve_user_id("telegram", "123456789")
+        # Link the email to the telegram user's canonical id BEFORE resolving it.
+        self.store.link_identity(telegram_user, "email", "user@example.com")
+        self.assertEqual(self.store.resolve_user_id("email", "user@example.com"), telegram_user)
+        self.assertTrue(self.store.email_linked_to_user(telegram_user, "user@example.com"))
+
+    def test_otp_flow(self):
+        user = self.store.resolve_user_id("telegram", "tg-otp")
+        code = self.store.create_otp(user, "otp@example.com")
+        self.assertEqual(len(code), 6)
+        # Wrong code rejected.
+        ok, msg = self.store.verify_otp(user, "otp@example.com", "000000")
+        self.assertFalse(ok)
+        # Correct code links the email.
+        ok, msg = self.store.verify_otp(user, "otp@example.com", code)
+        self.assertTrue(ok)
+        self.assertTrue(self.store.email_linked_to_user(user, "otp@example.com"))
+        # Reuse rejected.
+        ok, msg = self.store.verify_otp(user, "otp@example.com", code)
+        self.assertFalse(ok)
+
+    def test_otp_expired(self):
+        user = self.store.resolve_user_id("telegram", "tg-exp")
+        code = self.store.create_otp(user, "exp@example.com", ttl_seconds=1)
+        import time
+        time.sleep(1.1)
+        ok, msg = self.store.verify_otp(user, "exp@example.com", code)
+        self.assertFalse(ok)
+        self.assertIn("expired", msg.lower())
+
+    def test_multiple_email_linking_and_unlinking(self):
+        user = self.store.resolve_user_id("telegram", "tg-multi")
+        code1 = self.store.create_otp(user, "personal@example.com")
+        self.store.verify_otp(user, "personal@example.com", code1)
+        code2 = self.store.create_otp(user, "college@example.com")
+        self.store.verify_otp(user, "college@example.com", code2)
+        self.assertTrue(self.store.email_linked_to_user(user, "personal@example.com"))
+        self.assertTrue(self.store.email_linked_to_user(user, "college@example.com"))
+        # Unlink one; data preserved.
+        self.store.unlink_identity("email", "college@example.com")
+        self.assertFalse(self.store.email_linked_to_user(user, "college@example.com"))
+        self.assertTrue(self.store.email_linked_to_user(user, "personal@example.com"))
+
+    def test_email_opportunity_visible_from_telegram(self):
+        # Same canonical user via linked identities.
+        telegram_user = self.store.resolve_user_id("telegram", "tg-shared")
+        self.store.link_identity(telegram_user, "email", "shared@example.com")
+        email_user = self.store.resolve_user_id("email", "shared@example.com")
+        self.assertEqual(telegram_user, email_user)
+        # Opportunity arrives via email conversation.
+        self.app.respond("email-conv", email_user, "Here are three fictional internship opportunities: A, B, C. Analyze them.")
+        # Ask from a Telegram conversation (different conversation_id, same user).
+        self.assertIn("Opportunity A", self.app.respond("tg-conv", telegram_user, "Which one is best?"))
+
+    def test_telegram_opportunity_visible_from_email(self):
+        telegram_user = self.store.resolve_user_id("telegram", "tg-shared2")
+        self.store.link_identity(telegram_user, "email", "shared2@example.com")
+        email_user = self.store.resolve_user_id("email", "shared2@example.com")
+        self.app.respond("tg-conv2", telegram_user, "Here are three fictional internship opportunities: A, B, C. Analyze them.")
+        self.assertIn("Opportunity A", self.app.respond("email-conv2", email_user, "Which one is best?"))
+
+    def test_tasks_reminders_shared_across_channels(self):
+        telegram_user = self.store.resolve_user_id("telegram", "tg-shared3")
+        self.store.link_identity(telegram_user, "email", "shared3@example.com")
+        email_user = self.store.resolve_user_id("email", "shared3@example.com")
+        # Task created via email.
+        self.app.respond("email-conv3", email_user, "My ML project is due Friday.")
+        # Visible from Telegram.
+        self.assertIn("ML project", self.app.respond("tg-conv3", telegram_user, "Show upcoming tasks."))
+        # Reminder created via Telegram.
+        self.app.respond("tg-conv3", telegram_user, "Remind me about my ML project.")
+        self.assertEqual(len(self.store.find_reminders(email_user)), 1)
+
+    def test_conversation_histories_remain_isolated(self):
+        telegram_user = self.store.resolve_user_id("telegram", "tg-hist")
+        self.store.link_identity(telegram_user, "email", "hist@example.com")
+        email_user = self.store.resolve_user_id("email", "hist@example.com")
+        self.app.respond("tg-hist-conv", telegram_user, "Hello from telegram")
+        self.app.respond("email-hist-conv", email_user, "Hello from email")
+        tg_history = self.store.recent_messages("tg-hist-conv")
+        email_history = self.store.recent_messages("email-hist-conv")
+        self.assertTrue(any("telegram" in item["content"] for item in tg_history))
+        self.assertTrue(any("email" in item["content"] for item in email_history))
+        self.assertFalse(any("email" in item["content"] for item in tg_history))
+        self.assertFalse(any("telegram" in item["content"] for item in email_history))
+
+    def test_different_users_cannot_see_each_other_data(self):
+        user_a = self.store.resolve_user_id("telegram", "tg-a")
+        user_b = self.store.resolve_user_id("telegram", "tg-b")
+        self.app.respond("conv-a", user_a, "Here are three fictional internship opportunities: A, B, C. Analyze them.")
+        self.app.respond("conv-a", user_a, "My ML project is due Friday.")
+        self.assertEqual(self.store.latest_opportunities(user_b), [])
+        self.assertEqual(self.store.find_items(user_b), [])
+        self.assertEqual(self.store.find_reminders(user_b), [])
+
+    def test_identity_persistence_across_restart(self):
+        user = self.store.resolve_user_id("telegram", "tg-persist")
+        self.store.link_identity(user, "email", "persist@example.com")
+        store2 = StudentPilotStore(self.db_path)
+        self.assertEqual(store2.resolve_user_id("email", "persist@example.com"), user)
 
 
 if __name__ == "__main__":

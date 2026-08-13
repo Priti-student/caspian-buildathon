@@ -82,16 +82,27 @@ def your_agent_logic(text: str, conversation_id: str, user_id: str) -> str:
 def handle(message):
     """Reply on the originating channel while preserving its conversation."""
     sender = message.sender
-    user_id = sender.get("address", "unknown") if isinstance(sender, dict) else str(sender)
-    answer = your_agent_logic(message.text, message.conversation_id, user_id)
+    channel = message.channel or "unknown"
+    address = sender.get("address", "unknown") if isinstance(sender, dict) else str(sender)
+    # Resolve the canonical StudentPilot user for this channel identity.
+    user_id = store.resolve_user_id(channel, address)
+    # Preserve subject and fall back to HTML when plain text is absent.
+    text = message.text or message.html or ""
+    if message.subject:
+        text = f"{message.subject}\n\n{text}"
+    answer = your_agent_logic(text, message.conversation_id, user_id)
     message.reply(answer)
 
 
 if __name__ == "__main__":
     telegram = client.connect_telegram(bot_token=get_env_setting("TELEGRAM_BOT_TOKEN"))
     print(f"Telegram bot connected: {telegram['address']}")
-    # Optionally connect an email mailbox for outbound-only email output.
-    if get_optional_env_setting("CASPIAN_EMAIL_CONNECTION_ID") is None:
+    # Email is a first-class channel. Reuse the existing connection if present;
+    # otherwise create the mailbox once.
+    email_connection_id = get_optional_env_setting("CASPIAN_EMAIL_CONNECTION_ID")
+    if email_connection_id:
+        print(f"Email connected: studentpilot@agents.trycaspianai.com (connection {email_connection_id})")
+    else:
         email_settings = {
             "customer_id": get_optional_env_setting("CASPIAN_EMAIL_CUSTOMER_ID"),
             "agent_id": get_optional_env_setting("CASPIAN_EMAIL_AGENT_ID"),

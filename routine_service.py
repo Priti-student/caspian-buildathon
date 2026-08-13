@@ -24,7 +24,7 @@ class RoutineService:
         if not self._is_routine_request(text):
             return None
         target_date = date.today() + timedelta(days=1)
-        commitments = [dict(item) for item in self._store.find_items_on(conversation_id, target_date.isoformat())]
+        commitments = [dict(item) for item in self._store.find_items_on(user_id, target_date.isoformat())]
         try:
             result = self._llm.complete_json(
                 ROUTINE_PROMPT.format(target_date=target_date.isoformat(), target_weekday=target_date.strftime("%A")),

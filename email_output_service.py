@@ -29,7 +29,7 @@ class EmailOutputService:
         content_type, recipient = self._classify(lowered)
         if content_type is None:
             return "What would you like me to email you? For example: \"email me the opportunities\" or \"send tomorrow's routine to my email\"."
-        body = self._build_content(conversation_id, content_type)
+        body = self._build_content(user_id, content_type)
         if body is None:
             return "There is nothing to email for that yet."
         if self._sender is None:
@@ -60,17 +60,17 @@ class EmailOutputService:
             return "reminders", recipient
         return None, None
 
-    def _build_content(self, conversation_id: str, content_type: str) -> str | None:
+    def _build_content(self, user_id: str, content_type: str) -> str | None:
         if content_type == "opportunities":
-            return self._opportunities_content(conversation_id)
+            return self._opportunities_content(user_id)
         if content_type == "routine":
-            return self._routine_content(conversation_id)
+            return self._routine_content(user_id)
         if content_type == "reminders":
-            return self._reminders_content(conversation_id)
+            return self._reminders_content(user_id)
         return None
 
-    def _opportunities_content(self, conversation_id: str) -> str | None:
-        items = self._store.latest_opportunities(conversation_id)
+    def _opportunities_content(self, user_id: str) -> str | None:
+        items = self._store.latest_opportunities(user_id)
         if not items:
             return None
         lines = ["Opportunity summary"]
@@ -87,9 +87,9 @@ class EmailOutputService:
             )
         return "\n\n".join(lines)
 
-    def _routine_content(self, conversation_id: str) -> str | None:
+    def _routine_content(self, user_id: str) -> str | None:
         target_date = date.today() + timedelta(days=1)
-        items = self._store.find_items_on(conversation_id, target_date.isoformat())
+        items = self._store.find_items_on(user_id, target_date.isoformat())
         if not items:
             return None
         lines = [f"Tomorrow's commitments ({target_date.isoformat()}):"]
@@ -102,8 +102,8 @@ class EmailOutputService:
             lines.append(f"- {item['title']} ({item['item_type']}){time_span}")
         return "\n".join(lines)
 
-    def _reminders_content(self, conversation_id: str) -> str | None:
-        reminders = self._store.find_reminders(conversation_id)
+    def _reminders_content(self, user_id: str) -> str | None:
+        reminders = self._store.find_reminders(user_id)
         if not reminders:
             return None
         lines = ["Your reminders:"]
