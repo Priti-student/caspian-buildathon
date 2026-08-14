@@ -1,5 +1,6 @@
 """Career-opportunity analysis independent from Caspian message delivery."""
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,6 +11,21 @@ CATEGORIES = {"Internship", "Job", "Hackathon", "Scholarship", "Competition", "W
 URGENCY_LEVELS = {"High", "Medium", "Low", "Not specified"}
 NOT_SPECIFIED = "Not specified"
 ANALYSIS_ERROR = "I couldn't analyze that opportunity right now. Please try again shortly."
+
+# Keywords that indicate the text actually contains an opportunity listing.
+# "opportunity"/"opportunities" alone is deliberately excluded: a bare request
+# like "rank these opportunities" carries no listing content and must not be
+# treated as a source of extractable opportunities (prevents hallucination).
+OPPORTUNITY_TYPE_KEYWORDS = ("internship", "job", "hackathon", "scholarship", "competition", "workshop")
+OPPORTUNITY_LISTING_SIGNALS = ("apply", "hiring", "salary", "openings", "fwd:", "forwarded", "recruit", "apply now")
+
+
+def looks_like_opportunity_source(text: str) -> bool:
+    """True when the text plausibly contains a forwarded/pasted opportunity listing."""
+    lower = text.lower()
+    has_type = any(keyword in lower for keyword in OPPORTUNITY_TYPE_KEYWORDS)
+    has_signal = any(signal in lower for signal in OPPORTUNITY_LISTING_SIGNALS)
+    return has_type or has_signal
 
 ANALYSIS_PROMPT = """You analyze career opportunities for students. Return ONLY one JSON object.
 
@@ -99,7 +115,13 @@ class OpportunityAnalyzer:
             result = self._llm.complete_json(ANALYSIS_PROMPT, text, history)
             if result.get("is_opportunity") is not True:
                 return None
+            # Guard against hallucination: only accept opportunities when the
+            # source text actually contains an opportunity listing, and drop any
+            # individual opportunity that is not supported by the source text.
+            if not looks_like_opportunity_source(text):
+                return None
             opportunities = self._validated_opportunities(result.get("opportunities"))
+            opportunities = [item for item in opportunities if self._supported_by_source(item, text)]
             opportunities.sort(key=lambda item: item.rank)
             requested_top_n = result.get("requested_top_n")
             top_n = requested_top_n if isinstance(requested_top_n, int) and requested_top_n > 0 else None
@@ -156,6 +178,34 @@ class OpportunityAnalyzer:
                 )
             )
         return opportunities
+
+    @staticmethod
+    def _supported_by_source(item: Opportunity, text: str) -> bool:
+        """Return True when the opportunity is plausibly derived from the source text.
+
+        An opportunity is considered supported if its organization or title appears
+        in the source, or if a significant title token shares a common prefix with
+        a source token (tolerating plurals such as opportunity/opportunities).
+        This rejects hallucinated opportunities the model invents when the source
+        contains no matching content.
+        """
+        source = text.lower()
+        for candidate in (item.organization, item.title):
+            if candidate and candidate.lower() != NOT_SPECIFIED.lower() and candidate.lower() in source:
+                return True
+        title_words = set(re.findall(r"[a-z]{4,}", item.title.lower()))
+        source_words = set(re.findall(r"[a-z]{4,}", source))
+        for word in title_words:
+            for source_word in source_words:
+                common = 0
+                for a, b in zip(word, source_word):
+                    if a == b:
+                        common += 1
+                    else:
+                        break
+                if common >= 4:
+                    return True
+        return False
 
     @staticmethod
     def _text(value: Any) -> str:

@@ -4,7 +4,7 @@ from email_output_service import EmailOutputService, EmailSender
 from identity_service import IdentityService
 from llm_service import FeatherlessLLM
 from opportunity_memory_service import OpportunityMemoryService
-from opportunity_service import OpportunityAnalyzer
+from opportunity_service import OpportunityAnalyzer, looks_like_opportunity_source
 from planning_service import PlanningService
 from reminder_service import ReminderService
 from routine_service import RoutineService
@@ -36,20 +36,18 @@ class StudentPilotService:
             if answer is None:
                 answer = self._reminders.handle(conversation_id, user_id, text, history)
             if answer is None:
-                answer = self._planner.handle(conversation_id, user_id, text, history)
-            if answer is None:
                 answer = self._opportunity_memory.handle_followup(user_id, text)
             if answer is None:
-                extracted = self._opportunities.extract(text, history)
-                if extracted is not None:
-                    opportunities, requested_top_n = extracted
-                    if opportunities:
-                        if requested_top_n:
-                            opportunities = opportunities[:requested_top_n]
-                        self._store.save_opportunities(conversation_id, user_id, [
-                            self._opportunities.as_record(item) for item in opportunities
-                        ])
-                        answer = self._opportunities.format(opportunities)
+                # When the text looks like a forwarded/pasted opportunity listing,
+                # extract opportunities BEFORE the planner so they are stored as
+                # opportunity_records rather than misclassified as planner tasks.
+                extraction_tried = looks_like_opportunity_source(text)
+                if extraction_tried:
+                    answer = self._extract_and_save_opportunities(conversation_id, user_id, text, history)
+            if answer is None:
+                answer = self._planner.handle(conversation_id, user_id, text, history)
+            if answer is None and not extraction_tried:
+                answer = self._extract_and_save_opportunities(conversation_id, user_id, text, history)
             if answer is None:
                 answer = self._llm.reply(text, history)
             self._store.add_message(conversation_id, user_id, "user", text)
@@ -57,3 +55,22 @@ class StudentPilotService:
             return answer
         except Exception:
             return "I’m having trouble accessing StudentPilot right now. Please try again shortly."
+
+    def _extract_and_save_opportunities(self, conversation_id: str, user_id: str, text: str, history: list[dict[str, str]]) -> str | None:
+        """Extract opportunities from text, persist them, and format a reply.
+
+        Returns None when the text is not an opportunity submission, so the
+        caller can fall through to the next handler.
+        """
+        extracted = self._opportunities.extract(text, history)
+        if extracted is None:
+            return None
+        opportunities, requested_top_n = extracted
+        if not opportunities:
+            return None
+        if requested_top_n:
+            opportunities = opportunities[:requested_top_n]
+        self._store.save_opportunities(conversation_id, user_id, [
+            self._opportunities.as_record(item) for item in opportunities
+        ])
+        return self._opportunities.format(opportunities)

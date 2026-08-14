@@ -3,6 +3,9 @@
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
+from unittest import mock
+
+import planning_service
 
 from email_output_service import EmailOutputService
 from identity_service import IdentityService
@@ -160,6 +163,50 @@ class MemoryAndPlanningTests(unittest.TestCase):
         if today.weekday() == 6:
             self.assertEqual(PlanningService._relative_date("next Monday"), (today + timedelta(days=8)).isoformat())
         self.assertIsNone(PlanningService._relative_date("no date here"))
+
+    def test_upcoming_friday_and_tomorrow_resolve_deterministically(self):
+        # Freeze "today" to Thursday 2026-08-13 so expected dates are fixed.
+        class FixedDate(date):
+            @classmethod
+            def today(cls):
+                return date(2026, 8, 13)
+
+        with mock.patch.object(planning_service, "date", FixedDate):
+            self.assertEqual(PlanningService._relative_date("upcoming Friday"), "2026-08-14")
+            self.assertEqual(PlanningService._relative_date("this Friday"), "2026-08-14")
+            self.assertEqual(PlanningService._relative_date("next Friday"), "2026-08-21")
+            self.assertEqual(PlanningService._relative_date("tomorrow"), "2026-08-14")
+
+    def test_llm_cannot_introduce_unsupported_opportunity_records(self):
+        # The FakeLLM returns opportunities for any text containing "opportunit",
+        # but the source text carries no listing content, so nothing is persisted.
+        self.app.respond("conv-hall", "user-hall",
+                         "I have mailed you some opportunities rank these opportunities and tell me which is best")
+        self.assertEqual(self.store.latest_opportunities("user-hall"), [])
+
+    def test_forwarded_email_opportunities_stored_as_opportunities_not_tasks(self):
+        email_text = ("Fwd: Internship opportunities. Apply now! "
+                      "Machine Learning Internship at Amrata, salary 10k/month. "
+                      "Data Analytics Internship at Amrata, salary 10k/month.")
+        self.app.respond("conv-email-opp", "user-email-opp", email_text)
+        self.assertEqual(len(self.store.latest_opportunities("user-email-opp")), 3)
+        self.assertEqual(self.store.find_items("user-email-opp"), [])
+
+    def test_cross_channel_opportunity_retrieval_after_reorder(self):
+        telegram_user = self.store.resolve_user_id("telegram", "tg-reorder")
+        self.store.link_identity(telegram_user, "email", "reorder@example.com")
+        email_user = self.store.resolve_user_id("email", "reorder@example.com")
+        self.assertEqual(telegram_user, email_user)
+        self.app.respond("email-conv-reorder", email_user,
+                         "Fwd: Internship opportunities. Apply now! Machine Learning Internship at Amrata.")
+        self.assertIn("Opportunity A", self.app.respond("tg-conv-reorder", telegram_user, "Which one is best?"))
+
+    def test_normal_task_message_still_works(self):
+        self.app.respond("conv-task", "user-task", "My ML project is due Friday.")
+        items = self.store.find_items("user-task")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["item_type"], "task")
+        self.assertIsNotNone(items[0]["deadline"])
 
     def test_deadline_vs_event_distinction(self):
         self.assertTrue(PlanningService._is_deadline("My ML project is due Friday."))

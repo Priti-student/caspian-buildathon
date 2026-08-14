@@ -66,10 +66,15 @@ class PlanningService:
         result["item_type"] = result["item_type"] if result["item_type"] in {"task", "deadline", "meeting", "class", "interview", "personal event", "other"} else "other"
         relative_date = PlanningService._relative_date(source_text)
         if relative_date:
+            # A deterministic Python-resolved date overrides any date the LLM
+            # supplied, and the other date field is cleared so the stored item
+            # never carries a conflicting LLM-invented date.
             if PlanningService._is_deadline(source_text):
                 result["deadline"] = relative_date
+                result["event_date"] = None
             else:
                 result["event_date"] = relative_date
+                result["deadline"] = None
         return result
 
     @staticmethod
@@ -114,7 +119,9 @@ class PlanningService:
             return (today + timedelta(days=7)).isoformat()
 
         weekdays = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}
-        match = re.search(r"\b(this|next)\s+(" + "|".join(weekdays) + r")\b", lower)
+        # "upcoming Friday" is treated like "this Friday" (the next occurrence),
+        # so it resolves deterministically instead of being left to the LLM.
+        match = re.search(r"\b(this|next|upcoming)\s+(" + "|".join(weekdays) + r")\b", lower)
         if match:
             prefix, weekday = match.group(1), match.group(2)
             target = weekdays[weekday]

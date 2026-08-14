@@ -10,6 +10,7 @@ ROUTINE_PROMPT = """You build a practical one-day schedule for {target_date} ({t
 Return ONLY JSON. Schema: {{"blocks":[{{"start":"HH:MM","end":"HH:MM","activity":"string"}}],"needs_more":false,"clarification":"string or null"}}
 
 Rules:
+- The schedule is strictly for {target_date} ({target_weekday}). Never reference, compute, or display any other date, and never invent a date such as a year or a weekday that differs from {target_weekday}.
 - Preserve every fixed-time commitment exactly from the supplied commitments; do not reschedule or overlap them.
 - Fill in the remaining time with the user's stated work items and reasonable personal slots (morning routine, meals, rest).
 - If there is insufficient information to build a meaningful day, set needs_more true and ask only for the missing essentials.
