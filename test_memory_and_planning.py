@@ -477,6 +477,49 @@ class MemoryAndPlanningTests(unittest.TestCase):
         store2 = StudentPilotStore(self.db_path)
         self.assertEqual(store2.resolve_user_id("email", "persist@example.com"), user)
 
+    # ── Regression tests for reported issues ────────────────────────────────
+
+    def test_mailed_opportunities_reference_returns_details_not_tasks(self):
+        """When the user says 'I have mailed you some opportunities', the bot
+        must return the stored opportunity details with links instead of
+        listing old tasks/events."""
+        # Seed an opportunity via email.
+        self.app.respond("conv-mail-opp", "user-mail-opp",
+                         "Here are three fictional internship opportunities: A, B, C. Analyze them.")
+        # Seed an unrelated pending task.
+        self.app.respond("conv-mail-opp", "user-mail-opp", "My ML project is due Friday.")
+        # User references the mailed opportunities from Telegram.
+        reply = self.app.respond("conv-mail-opp", "user-mail-opp",
+                                 "I have mailed you some opportunities")
+        # Must include opportunity details with links, not the ML project task.
+        self.assertIn("Opportunity A", reply)
+        self.assertIn("Links:", reply)
+        self.assertNotIn("ML project", reply)
+        # The task must still be pending (not accidentally completed).
+        pending = self.store.find_items("user-mail-opp")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["title"], "ML project")
+
+    def test_complete_without_target_completes_all_pending(self):
+        """Saying 'I have completed my work' without naming a task should
+        complete all pending items instead of asking which task."""
+        planner = PlanningService(self.llm, self.store)
+        history = []
+        planner.handle("c", "u-complete-all", "My ML project is due Friday.", history)
+        planner.handle("c", "u-complete-all", "I have a meeting tomorrow at 4 PM.", history)
+        # FakeLLM returns target "ML project" for "complete" text, so use a
+        # direct call to verify the no-target path via a custom LLM.
+        class NoTargetLLM:
+            def complete_json(self, prompt, text, history=None):
+                return {"action": "complete", "target": None, "needs_clarification": False}
+        planner_no_target = PlanningService(NoTargetLLM(), self.store)
+        result = planner_no_target.handle("c", "u-complete-all", "I have completed my work", history)
+        self.assertIn("Marked as completed:", result)
+        self.assertIn("ML project", result)
+        self.assertIn("Meeting", result)
+        # All items should now be completed (not in pending).
+        self.assertEqual(self.store.find_items("u-complete-all"), [])
+
 
 if __name__ == "__main__":
     unittest.main()
