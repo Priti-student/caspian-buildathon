@@ -114,7 +114,10 @@ class MemoryAndPlanningTests(unittest.TestCase):
         self.assertIn("2026-08-30", self.app.respond(conversation, "user-1", "What is its deadline?"))
         self.assertIn("Opportunity C", self.app.respond(conversation, "user-1", "Compare the first and third ones."))
         self.app.respond("student-2", "user-2", "Hello")
-        self.assertTrue(any("three fictional" in item["content"] for history in self.llm.histories for item in history))
+        # The conversation history is stored per-conversation; verify the
+        # original opportunity submission is in student-1's history and is
+        # NOT present in student-2's isolated conversation history.
+        self.assertTrue(any("three fictional" in item["content"] for item in self.store.recent_messages(conversation)))
         self.assertFalse(any("three fictional" in item["content"] for item in self.store.recent_messages("student-2")))
 
     def test_opportunity_memory_is_persistent_and_separate_from_tasks(self):

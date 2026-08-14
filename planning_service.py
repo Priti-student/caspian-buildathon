@@ -11,7 +11,16 @@ from storage import StudentPilotStore
 PLANNING_PROMPT = """You extract and manage a student's tasks and events. Return ONLY JSON.
 Today is {today}. Resolve unambiguous relative dates to ISO YYYY-MM-DD. If a date/time is genuinely ambiguous, set needs_clarification true and do not add/update/delete anything.
 Schema: {{"action":"add|list|query|update|delete|complete|none","target":"string or null","items":[{{"title":"string","item_type":"task|deadline|meeting|class|interview|personal event|other","event_date":"YYYY-MM-DD or null","start_time":"HH:MM or null","end_time":"HH:MM or null","deadline":"YYYY-MM-DD or null","priority":"high|medium|low or null","notes":"string or null","recurrence":"string or null"}}],"updates":{{"field":"value"}},"needs_clarification":false,"clarification":"string or null"}}
-Rules: detect only commitments the user wants remembered or management requests. A due task has title/item_type task and its due date in deadline, not event_date. An event has its date in event_date. Never invent missing details. For unrelated messages use action none."""
+Rules:
+- Detect only commitments the user wants remembered or management requests.
+- A due task has title/item_type task and its due date in deadline, not event_date. An event has its date in event_date.
+- Statements like "I have to submit X tomorrow", "I need to finish X by Friday", "X is due tomorrow", "My X deadline is tomorrow" are ADD actions with item_type task and the resolved date in deadline.
+- Statements like "I have a meeting with X on Monday", "I have an interview next week" are ADD actions with item_type meeting/interview and the date in event_date.
+- "Show my tasks", "list pending tasks", "what do I have" are LIST actions.
+- "Mark X complete", "I completed X", "I finished X" are COMPLETE actions with target X.
+- "Delete X", "remove X" are DELETE actions with target X.
+- "Change X to Y", "reschedule X" are UPDATE actions with target X and updates.
+- Never invent missing details. For unrelated messages use action none."""
 
 
 class PlanningService:

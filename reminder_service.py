@@ -1,5 +1,6 @@
 """Reminder scheduling and state management for tasks and deadlines."""
 
+import re
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -56,9 +57,29 @@ class ReminderService:
 
     @staticmethod
     def _is_reminder_request(text: str) -> bool:
+        """Detect actual reminder-management requests.
+
+        A bare statement like "My ML project deadline is tomorrow" or
+        "I have to submit X tomorrow" is a task-add request, not a reminder
+        request, so it must NOT be intercepted here.
+        """
         lower = text.lower()
-        markers = ("remind", "reminder", "deadline", "deadlines", "postpone", "stop reminding")
-        return any(marker in lower for marker in markers)
+        # Explicit reminder-management phrases.
+        if any(marker in lower for marker in ("remind me", "reminder", "stop reminding", "postpone", "remind")):
+            return True
+        # Deadline *listing* requests (not task-add statements).
+        if "deadline" in lower or "deadlines" in lower:
+            # "My X deadline is tomorrow" / "X is due tomorrow" are task adds.
+            if re.search(r"\b(?:my|the|this|that)\s+\w+\s+deadline\s+(?:is|was)\b", lower):
+                return False
+            if re.search(r"\b(?:i have to|i need to|i must|i will|i am going to)\b", lower):
+                return False
+            # "what deadlines", "show deadlines", "deadlines this week" are lists.
+            if any(phrase in lower for phrase in ("what deadlines", "show deadlines", "deadlines this week",
+                                                   "approaching deadlines", "upcoming deadlines", "list deadlines")):
+                return True
+            return False
+        return False
 
     def _add_reminder(self, conversation_id: str, user_id: str, target: str, result: dict[str, Any]) -> str:
         items = self._store.find_items(user_id, target)

@@ -429,6 +429,24 @@ class StudentPilotStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def due_reminders(self, now: str | None = None) -> list[dict[str, Any]]:
+        """Return active reminders whose remind_at time has passed."""
+        now = now or self._now()
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM reminders WHERE active=1 AND remind_at <= ? ORDER BY remind_at, id",
+                (now,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def deactivate_reminder(self, reminder_id: int) -> None:
+        """Mark a reminder as no longer active (fired)."""
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE reminders SET active=0, updated_at=? WHERE id=?",
+                (self._now(), reminder_id),
+            )
+
     def update_reminders(self, user_id: str, query: str, updates: dict[str, Any]) -> int:
         allowed = {"remind_at", "recurrence", "active", "title"}
         values = {key: value for key, value in updates.items() if key in allowed and value is not None}

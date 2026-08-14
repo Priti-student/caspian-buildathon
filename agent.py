@@ -4,13 +4,19 @@ Set ``your_agent_logic`` to call your actual agent.  The same handler services
 every Caspian channel that is connected below.
 """
 
+import logging
 import os
+import threading
+import time
 from pathlib import Path
 
 from caspian_sdk import CommClient, CommError
 from llm_service import FeatherlessLLM
+from reminder_dispatcher import ReminderDispatcher
 from storage import StudentPilotStore
 from studentpilot_service import StudentPilotService
+
+logger = logging.getLogger(__name__)
 
 
 def get_env_setting(name: str) -> str:
@@ -73,6 +79,33 @@ def send_email_via_caspian(recipient: str | None, subject: str, body: str) -> st
 studentpilot = StudentPilotService(llm, store, email_sender=send_email_via_caspian)
 
 
+def send_telegram_reminder(conversation_id: str, message: str) -> bool:
+    """Send a proactive Telegram message to the originating conversation."""
+    try:
+        client.send_message(conversation_id, message)
+        return True
+    except CommError:
+        logger.exception("Failed to send Telegram reminder to %s", conversation_id)
+        return False
+
+
+reminder_dispatcher = ReminderDispatcher(
+    store,
+    email_sender=send_email_via_caspian,
+    telegram_sender=send_telegram_reminder,
+)
+
+
+def reminder_loop(stop_event: threading.Event) -> None:
+    """Background loop that dispatches due reminders every 30 seconds."""
+    while not stop_event.is_set():
+        try:
+            reminder_dispatcher.dispatch_due()
+        except Exception:
+            logger.exception("Reminder dispatch failed")
+        stop_event.wait(30)
+
+
 def your_agent_logic(text: str, conversation_id: str, user_id: str) -> str:
     """Use isolated, persistent context for every channel conversation."""
     return studentpilot.respond(conversation_id, user_id, text)
@@ -97,6 +130,11 @@ def handle(message):
 if __name__ == "__main__":
     telegram = client.connect_telegram(bot_token=get_env_setting("TELEGRAM_BOT_TOKEN"))
     print(f"Telegram bot connected: {telegram['address']}")
+    # Start the background reminder dispatcher.
+    stop_event = threading.Event()
+    reminder_thread = threading.Thread(target=reminder_loop, args=(stop_event,), daemon=True)
+    reminder_thread.start()
+    print("Reminder dispatcher started.")
     # Email is a first-class channel. Reuse the existing connection if present;
     # otherwise create the mailbox once.
     email_connection_id = get_optional_env_setting("CASPIAN_EMAIL_CONNECTION_ID")
