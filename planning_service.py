@@ -70,10 +70,14 @@ class PlanningService:
             self._invalidate_routines_for_items(user_id, pending)
             return "Marked as completed: " + "; ".join(item["title"] for item in pending) + "."
         if action == "delete":
-            # "delete all my tasks", "delete everything", "start fresh" → delete all pending
-            if not isinstance(target, str) or not target.strip() or any(
-                phrase in target.lower() for phrase in ("all", "everything", "every")
-            ):
+            # Only delete ALL when the user explicitly says so in their message.
+            lower_text = text.lower()
+            delete_all = any(phrase in lower_text for phrase in (
+                "delete all", "remove all", "clear all", "delete everything",
+                "remove everything", "clear everything", "delete every",
+                "remove every", "clear every", "start fresh",
+            ))
+            if delete_all:
                 pending = self._store.find_items(user_id)
                 if not pending:
                     return "You have no pending tasks or events to delete."
@@ -81,6 +85,23 @@ class PlanningService:
                     self._store.delete_items(user_id, item["title"])
                 self._invalidate_routines_for_items(user_id, pending)
                 return "Deleted all pending tasks and events."
+            # If the LLM didn't provide a target, try to extract it from the
+            # user's original text (e.g. "Delete the Interview with Company X
+            # from upcoming tasks" → "Interview with Company X").
+            if not isinstance(target, str) or not target.strip():
+                extracted = re.sub(
+                    r"^(?:please\s+)?(?:delete|remove|clear|erase|wipe)\s+(?:the\s+|my\s+)?",
+                    "", lower_text,
+                )
+                extracted = re.sub(r"\s+(?:from|in|on)\s+.*$", "", extracted)
+                extracted = extracted.strip()
+                if extracted and extracted not in (
+                    "all", "everything", "every", "all tasks", "all events",
+                    "all tasks and events", "all pending tasks",
+                ):
+                    target = extracted
+            if not isinstance(target, str) or not target.strip():
+                return "Which task or event do you mean?"
             # Find matching items before deletion so we can invalidate routines.
             matched = [item for item in self._store.find_items(user_id) if target.lower() in item["title"].lower()]
             count = self._store.delete_items(user_id, target)
