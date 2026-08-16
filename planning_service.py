@@ -172,16 +172,31 @@ class PlanningService:
             return (today + timedelta(days=7)).isoformat()
 
         weekdays = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6}
-        # "upcoming Friday" is treated like "this Friday" (the next occurrence),
-        # so it resolves deterministically instead of being left to the LLM.
+        # "this Friday" / "upcoming Friday" → the next occurrence of that weekday.
+        # "next Friday" → the occurrence after "this Friday" (always +7 days).
         match = re.search(r"\b(this|next|upcoming)\s+(" + "|".join(weekdays) + r")\b", lower)
         if match:
             prefix, weekday = match.group(1), match.group(2)
             target = weekdays[weekday]
             days = (target - today.weekday()) % 7
-            if prefix == "next" and days <= 2:
-                # "next Monday" said on Sunday means the Monday after tomorrow's Monday.
+            if days == 0:
+                # "this Friday" said on Friday means next week's Friday, not today.
+                days = 7
+            if prefix == "next":
+                # "next Friday" always means the Friday after "this Friday".
                 days += 7
+            return (today + timedelta(days=days)).isoformat()
+        # Bare weekday names: "on Tuesday", "by Wednesday", "Tuesday", etc.
+        # Resolve to the next occurrence of that weekday (the coming Tuesday/Wednesday).
+        match = re.search(r"\b(" + "|".join(weekdays) + r")\b", lower)
+        if match:
+            weekday = match.group(1)
+            target = weekdays[weekday]
+            days = (target - today.weekday()) % 7
+            if days == 0:
+                # If today is that weekday, "on Tuesday" said on Tuesday means
+                # next week's Tuesday (the coming one), not today.
+                days = 7
             return (today + timedelta(days=days)).isoformat()
         return None
 
