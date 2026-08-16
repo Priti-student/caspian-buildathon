@@ -42,9 +42,17 @@ class EmailOutputService:
 
     @staticmethod
     def _is_email_request(text: str) -> bool:
+        lower = text.lower()
+        # A routine/schedule delivery-time preference (e.g. "send my routines to
+        # me at 6:43 pm") is NOT an email request.
+        if re.search(r"(?:routine|schedule).*(?:at|by)\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)\b", lower):
+            return False
+        # Explicit email-request phrases only.
         markers = ("email me", "email it", "email the", "email my", "send me an email",
-                   "send to my email", "send it to my email", "send my", "send the", "send tomorrow")
-        return any(marker in text for marker in markers)
+                   "send to my email", "send it to my email", "send my routine to my email",
+                   "send my schedule to my email", "send tomorrow's routine to my email",
+                   "send tomorrow's schedule to my email", "email my routine", "email my schedule")
+        return any(marker in lower for marker in markers)
 
     @staticmethod
     def _classify(text: str) -> tuple[str | None, str | None]:

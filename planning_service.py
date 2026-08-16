@@ -62,13 +62,23 @@ class PlanningService:
             for item in pending:
                 self._store.update_items(user_id, item["title"], {"status": "completed"})
             return "Marked as completed: " + "; ".join(item["title"] for item in pending) + "."
+        if action == "delete":
+            # "delete all my tasks", "delete everything", "start fresh" → delete all pending
+            if not isinstance(target, str) or not target.strip() or any(
+                phrase in target.lower() for phrase in ("all", "everything", "every")
+            ):
+                pending = self._store.find_items(user_id)
+                if not pending:
+                    return "You have no pending tasks or events to delete."
+                for item in pending:
+                    self._store.delete_items(user_id, item["title"])
+                return "Deleted all pending tasks and events."
+            count = self._store.delete_items(user_id, target)
+            return "Deleted." if count else "I couldn't find that task or event."
         if not isinstance(target, str) or not target.strip():
             return "Which task or event do you mean?"
         if action == "query":
             return self._format_items(self._store.find_items(user_id, target))
-        if action == "delete":
-            count = self._store.delete_items(user_id, target)
-            return "Deleted." if count else "I couldn't find that task or event."
         if action == "update":
             updates = result.get("updates") if isinstance(result.get("updates"), dict) else {}
             count = self._store.update_items(user_id, target, updates)

@@ -13,6 +13,7 @@ from pathlib import Path
 from caspian_sdk import CommClient, CommError
 from llm_service import FeatherlessLLM
 from reminder_dispatcher import ReminderDispatcher
+from routine_dispatcher import RoutineDispatcher
 from storage import StudentPilotStore
 from studentpilot_service import StudentPilotService
 
@@ -95,6 +96,12 @@ reminder_dispatcher = ReminderDispatcher(
     telegram_sender=send_telegram_reminder,
 )
 
+routine_dispatcher = RoutineDispatcher(
+    store,
+    routine_service=studentpilot._routine,
+    telegram_sender=send_telegram_reminder,
+)
+
 
 def reminder_loop(stop_event: threading.Event) -> None:
     """Background loop that dispatches due reminders every 30 seconds."""
@@ -104,6 +111,16 @@ def reminder_loop(stop_event: threading.Event) -> None:
         except Exception:
             logger.exception("Reminder dispatch failed")
         stop_event.wait(30)
+
+
+def routine_loop(stop_event: threading.Event) -> None:
+    """Background loop that sends daily routines at each user's preferred time."""
+    while not stop_event.is_set():
+        try:
+            routine_dispatcher.dispatch_due()
+        except Exception:
+            logger.exception("Routine dispatch failed")
+        stop_event.wait(60)
 
 
 def your_agent_logic(text: str, conversation_id: str, user_id: str) -> str:
@@ -135,6 +152,10 @@ if __name__ == "__main__":
     reminder_thread = threading.Thread(target=reminder_loop, args=(stop_event,), daemon=True)
     reminder_thread.start()
     print("Reminder dispatcher started.")
+    # Start the background routine dispatcher.
+    routine_thread = threading.Thread(target=routine_loop, args=(stop_event,), daemon=True)
+    routine_thread.start()
+    print("Routine dispatcher started.")
     # Email is a first-class channel. Reuse the existing connection if present;
     # otherwise create the mailbox once.
     email_connection_id = get_optional_env_setting("CASPIAN_EMAIL_CONNECTION_ID")

@@ -96,6 +96,30 @@ class StudentPilotStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_otp_user
                     ON otp_codes(canonical_user_id, email_address);
+                CREATE TABLE IF NOT EXISTS routine_preferences (
+                    user_id TEXT PRIMARY KEY,
+                    preferred_time TEXT NOT NULL DEFAULT '01:00',
+                    conversation_id TEXT,
+                    asked_for_preference INTEGER NOT NULL DEFAULT 0,
+                    asked_for_defaults INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS routine_defaults (
+                    id INTEGER PRIMARY KEY, user_id TEXT NOT NULL,
+                    day_of_week INTEGER, start_time TEXT NOT NULL,
+                    end_time TEXT NOT NULL, activity TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_routine_defaults_user
+                    ON routine_defaults(user_id);
+                CREATE TABLE IF NOT EXISTS daily_routines (
+                    id INTEGER PRIMARY KEY, user_id TEXT NOT NULL,
+                    routine_date TEXT NOT NULL, blocks TEXT NOT NULL,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    UNIQUE(user_id, routine_date)
+                );
+                CREATE INDEX IF NOT EXISTS idx_daily_routines_user
+                    ON daily_routines(user_id, routine_date);
                 """
             )
         self._migrate_legacy_user_ids()
@@ -471,6 +495,125 @@ class StudentPilotStore:
             count = cursor.rowcount
             cursor.close()
         return count
+
+    # ── Routine preferences, defaults, and daily routines ──
+
+    def find_all_routine_preferences(self):
+        """Return all users who have set a routine preference."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM routine_preferences ORDER BY user_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_routine_preference(self, user_id: str) -> dict:
+        """Return the user routine preference row, creating a default if absent."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM routine_preferences WHERE user_id=?", (user_id,)
+            ).fetchone()
+            if row:
+                return dict(row)
+            now = self._now()
+            connection.execute(
+                """INSERT INTO routine_preferences
+                   (user_id, preferred_time, conversation_id, asked_for_preference, asked_for_defaults, updated_at)
+                   VALUES (?, '01:00', NULL, 0, 0, ?)""",
+                (user_id, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM routine_preferences WHERE user_id=?", (user_id,)
+            ).fetchone()
+            return dict(row)
+
+    def set_routine_preferred_time(self, user_id: str, preferred_time: str, conversation_id=None) -> None:
+        """Set the user preferred daily routine delivery time (HH:MM)."""
+        with self._connection() as connection:
+            connection.execute(
+                """INSERT INTO routine_preferences
+                   (user_id, preferred_time, conversation_id, asked_for_preference, asked_for_defaults, updated_at)
+                   VALUES (?, ?, ?, 1, 0, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                       preferred_time=excluded.preferred_time,
+                       conversation_id=COALESCE(excluded.conversation_id, routine_preferences.conversation_id),
+                       asked_for_preference=1,
+                       updated_at=excluded.updated_at""",
+                (user_id, preferred_time, conversation_id, self._now()),
+            )
+
+    def mark_routine_preference_asked(self, user_id: str) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE routine_preferences SET asked_for_preference=1, updated_at=? WHERE user_id=?",
+                (self._now(), user_id),
+            )
+
+    def mark_routine_defaults_asked(self, user_id: str) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE routine_preferences SET asked_for_defaults=1, updated_at=? WHERE user_id=?",
+                (self._now(), user_id),
+            )
+
+    def add_routine_default(self, user_id: str, day_of_week, start_time: str, end_time: str, activity: str) -> None:
+        """Add a recurring default routine block. day_of_week 0-6 (Mon-Sun) or None for every day."""
+        with self._connection() as connection:
+            connection.execute(
+                """INSERT INTO routine_defaults
+                   (user_id, day_of_week, start_time, end_time, activity, created_at)
+                   VALUES (?,?,?,?,?,?)""",
+                (user_id, day_of_week, start_time, end_time, activity, self._now()),
+            )
+
+    def find_routine_defaults(self, user_id: str, day_of_week=None):
+        """Return default routine blocks, optionally filtered by weekday."""
+        with self._connection() as connection:
+            if day_of_week is None:
+                rows = connection.execute(
+                    "SELECT * FROM routine_defaults WHERE user_id=? ORDER BY start_time, id",
+                    (user_id,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """SELECT * FROM routine_defaults
+                       WHERE user_id=? AND (day_of_week IS NULL OR day_of_week=?)
+                       ORDER BY start_time, id""",
+                    (user_id, day_of_week),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_routine_defaults(self, user_id: str) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                "DELETE FROM routine_defaults WHERE user_id=?", (user_id,)
+            )
+
+    def save_daily_routine(self, user_id: str, routine_date: str, blocks) -> None:
+        """Persist a generated daily routine (blocks serialized as JSON)."""
+        import json
+        with self._connection() as connection:
+            connection.execute(
+                """INSERT INTO daily_routines (user_id, routine_date, blocks, created_at, updated_at)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(user_id, routine_date) DO UPDATE SET
+                       blocks=excluded.blocks, updated_at=excluded.updated_at""",
+                (user_id, routine_date, json.dumps(blocks), self._now(), self._now()),
+            )
+
+    def get_daily_routine(self, user_id: str, routine_date: str):
+        """Return the persisted daily routine blocks for a user/date, or None."""
+        import json
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT blocks FROM daily_routines WHERE user_id=? AND routine_date=?",
+                (user_id, routine_date),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["blocks"])
+        except (ValueError, TypeError):
+            return None
 
     @staticmethod
     def _now() -> str:
