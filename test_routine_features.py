@@ -77,6 +77,27 @@ class RoutineFeatureTests(unittest.TestCase):
         self.assertEqual(pref["preferred_time"], "04:00")
         self.assertEqual(pref["asked_for_preference"], 1)
 
+    def test_forwarded_email_not_misrouted_to_routine_time(self):
+        """A forwarded opportunity email (e.g. Internshala digest) containing
+        'message', 'schedule', and a time like '6:11 PM' scattered across
+        different lines must NOT be treated as a routine-time request."""
+        forwarded = (
+            "Fwd: CloudZapier is promoting Machine Learning internship! "
+            "---------- Forwarded message --------- From: Priti Ram "
+            "Date: Sun, Aug 16, 2026, 6:11 PM Subject: Fwd: CloudZapier "
+            "---------- Forwarded message --------- From: Internshala "
+            "learn new-age skills on your schedule! View more trainings "
+            "Actively hiring Machine Learning CloudZapier Work From Home "
+            "3 months Rs 10,000 - 20,000 /month Today Internship Apply now"
+        )
+        self.assertFalse(RoutineService._is_preferred_time_request(forwarded))
+        # It must also NOT be treated as an add-to-today's-routine request
+        # (the email contains "stay updated", "on your schedule!", and
+        # "Today Internship" scattered across different lines).
+        self.assertFalse(RoutineService._is_add_to_today_request(forwarded))
+        # And the routine handler must not intercept it.
+        self.assertIsNone(self.routine.handle("conv-fwd", "user-fwd", forwarded, []))
+
     def test_preferred_time_change(self):
         """User changes preferred routine delivery time."""
         self.routine.handle("conv", "user1", "send me my daily routine at 4am", [])
@@ -181,6 +202,69 @@ class RoutineFeatureTests(unittest.TestCase):
         delivered = dispatcher.dispatch_due()
         self.assertEqual(len(delivered), 0)
         self.assertEqual(len(sent), 0)
+
+    def test_routine_dispatcher_sends_info_when_nothing_scheduled(self):
+        """Routine dispatcher sends an informative message instead of a blank
+        routine when nothing is scheduled for the day (e.g. weekend with no
+        defaults or commitments)."""
+        # User with no defaults and no commitments for today; preferred time passed.
+        self.store.set_routine_preferred_time("user9", "00:00", "conv9")
+        sent = []
+        dispatcher = RoutineDispatcher(
+            self.store,
+            routine_service=self.routine,
+            telegram_sender=lambda conv_id, msg: sent.append((conv_id, msg)) or True,
+        )
+        delivered = dispatcher.dispatch_due()
+        self.assertEqual(len(delivered), 1)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][0], "conv9")
+        # Message must contain the weekday/date and the informative note, not
+        # just a bare "Your routine for today" header.
+        self.assertIn("Nothing scheduled today", sent[0][1])
+        self.assertIn("daily default routine", sent[0][1])
+        # Delivering again the same day must not send a second message.
+        delivered = dispatcher.dispatch_due()
+        self.assertEqual(len(delivered), 0)
+        self.assertEqual(len(sent), 1)
+
+    def test_routine_dispatcher_respects_time_change_same_day(self):
+        """Changing the preferred delivery time to a LATER time on the same day
+        must deliver the routine again at the new time (customizable delivery
+        time requirement)."""
+        from datetime import datetime
+
+        # Fixed day so the simulated timestamps remain internally consistent.
+        day = datetime(2026, 8, 17, 14, 24)  # Monday 14:24
+        today = day.date().isoformat()
+        # User originally wanted the routine at 14:24 and already received it
+        # at that time (simulated by the last_sent timestamp).
+        self.store.set_routine_preferred_time("user10", "14:24", "conv10")
+        sent = []
+        dispatcher = RoutineDispatcher(
+            self.store,
+            routine_service=self.routine,
+            telegram_sender=lambda conv_id, msg: sent.append((conv_id, msg)) or True,
+        )
+        dispatcher._last_sent["user10"] = f"{today}T14:24"
+
+        # 1) User changes preferred time to 16:51. Before that time nothing is sent.
+        self.store.set_routine_preferred_time("user10", "16:51", "conv10")
+        delivered = dispatcher.dispatch_due(now=datetime(2026, 8, 17, 16, 0))
+        self.assertEqual(len(delivered), 0)
+        self.assertEqual(len(sent), 0)
+
+        # 2) At the new time the routine IS sent.
+        delivered = dispatcher.dispatch_due(now=datetime(2026, 8, 17, 16, 51))
+        self.assertEqual(len(delivered), 1)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][0], "conv10")
+        self.assertEqual(dispatcher._last_sent["user10"], f"{today}T16:51")
+
+        # 3) A second dispatch later the same day must not send again.
+        delivered = dispatcher.dispatch_due(now=datetime(2026, 8, 17, 17, 0))
+        self.assertEqual(len(delivered), 0)
+        self.assertEqual(len(sent), 1)
 
 
 if __name__ == "__main__":

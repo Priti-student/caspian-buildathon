@@ -89,10 +89,28 @@ class RoutineService:
         # The time pattern requires either minutes OR am/pm, and accepts
         # plurals like "routines"/"schedules". We also accept "always/at"
         # wording without an explicit send/change verb.
+        #
+        # IMPORTANT: The match must be anchored to a single, short command
+        # window. A forwarded email (e.g. an Internshala digest) can contain
+        # "message", "schedule", and a time like "6:11 PM" scattered across
+        # different lines; a greedy `.*` would falsely classify it as a
+        # routine-time request. We therefore require the routine/schedule
+        # keyword and the time to appear within a bounded span (<= 40 chars)
+        # of each other, and we require an explicit send/change verb for the
+        # "message/deliver/give/get" form.
         time_pattern = r"(?:at|by)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?"
-        if re.search(r"(?:routine|schedule|routines|schedules).*" + time_pattern, lower):
+        # Form 1: "routine/schedule ... at/by HH:MM" with a bounded span.
+        if re.search(r"(?:routine|schedule|routines|schedules)[^.!?\n]{0,40}" + time_pattern, lower):
             return True
-        return bool(re.search(r"(?:send|message|deliver|give|get).*(?:routine|schedule|routines|schedules).*(?:at|by)", lower))
+        # Form 2: an explicit send/change verb + routine/schedule + at/by,
+        # all within a bounded span so forwarded emails don't match.
+        if re.search(
+            r"\b(?:send|message|deliver|give|get|change|set|always send)\b[^.!?\n]{0,40}"
+            r"\b(?:routine|schedule|routines|schedules)\b[^.!?\n]{0,40}\b(?:at|by)\b",
+            lower,
+        ):
+            return True
+        return False
 
     @staticmethod
     def _is_defaults_request(text: str) -> bool:
@@ -105,9 +123,19 @@ class RoutineService:
     @staticmethod
     def _is_add_to_today_request(text: str) -> bool:
         lower = text.lower()
-        return ("add" in lower or "include" in lower or "update" in lower) and (
-            "today" in lower or "routine" in lower or "schedule" in lower
-        )
+        # "add it to my today's routine", "include this in my routine",
+        # "update my routine", "add a meeting to today's schedule".
+        # The add/update verb and the routine/schedule/today reference must
+        # appear within a bounded span so a forwarded email (e.g. an Internshala
+        # digest containing "stay updated", "on your schedule!", and "Today
+        # Internship" scattered across different lines) is not misrouted here.
+        add_verb = r"\b(?:add|include|update)\b"
+        routine_ref = r"\b(?:routine|schedule|routines|schedules|today's routine|today's schedule)\b"
+        if re.search(add_verb + r"[^.!?\n]{0,40}" + routine_ref, lower):
+            return True
+        if re.search(routine_ref + r"[^.!?\n]{0,40}" + add_verb, lower):
+            return True
+        return False
 
     @staticmethod
     def _is_delete_routine_request(text: str) -> bool:

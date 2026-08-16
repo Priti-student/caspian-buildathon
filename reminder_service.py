@@ -52,7 +52,15 @@ class ReminderService:
             if not remind_at:
                 return "When should I remind you instead?"
             count = self._store.update_reminders(user_id, target, {"remind_at": remind_at})
-            return "Reminder postponed." if count else "I couldn't find an active reminder for that."
+            if count:
+                return "Reminder postponed."
+            # The original reminder may have already fired (or never existed).
+            # The user clearly wants a reminder about this topic at the new time,
+            # so create a fresh active reminder instead of failing silently.
+            self._store.create_reminder(
+                conversation_id, user_id, None, target, remind_at, None
+            )
+            return f"Reminder set for {target} at {remind_at}."
         return None
 
     @staticmethod

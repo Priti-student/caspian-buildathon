@@ -453,15 +453,48 @@ class StudentPilotStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    @staticmethod
+    def _parse_remind_time(value: str | None) -> datetime | None:
+        """Parse a remind_at value into a datetime.
+
+        Accepts both the space-separated form ("YYYY-MM-DD HH:MM") used when
+        storing reminders and the ISO "T" form used by ``_now`` so that the
+        lexicographic comparison cannot make future reminders appear due.
+        """
+        if not value:
+            return None
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M",
+        ):
+            try:
+                return datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+        return None
+
     def due_reminders(self, now: str | None = None) -> list[dict[str, Any]]:
-        """Return active reminders whose remind_at time has passed."""
-        now = now or self._now()
+        """Return active reminders whose remind_at time has passed.
+
+        ``remind_at`` is stored as "YYYY-MM-DD HH:MM" while ``now`` uses the
+        "YYYY-MM-DDTHH:MM:SS" ISO format, so the two are compared as parsed
+        datetimes. A naive string comparison would treat the space separator
+        as less than "T" and fire future reminders immediately.
+        """
+        now_str = now or self._now()
+        now_dt = self._parse_remind_time(now_str)
         with self._connection() as connection:
             rows = connection.execute(
-                "SELECT * FROM reminders WHERE active=1 AND remind_at <= ? ORDER BY remind_at, id",
-                (now,),
+                "SELECT * FROM reminders WHERE active=1 ORDER BY remind_at, id",
             ).fetchall()
-        return [dict(row) for row in rows]
+        due = []
+        for row in rows:
+            remind_dt = self._parse_remind_time(row["remind_at"])
+            if now_dt is not None and remind_dt is not None and remind_dt <= now_dt:
+                due.append(dict(row))
+        return due
 
     def deactivate_reminder(self, reminder_id: int) -> None:
         """Mark a reminder as no longer active (fired)."""

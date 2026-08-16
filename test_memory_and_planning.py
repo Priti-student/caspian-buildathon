@@ -302,6 +302,45 @@ class MemoryAndPlanningTests(unittest.TestCase):
         active = self.store.find_reminders("user-rem2")
         self.assertEqual(active[0]["remind_at"], "2026-08-20 09:00")
 
+    def test_future_same_day_reminder_not_due(self):
+        """A reminder scheduled LATER today must not be considered due.
+
+        remind_at is stored as 'YYYY-MM-DD HH:MM' (space separator) while the
+        dispatcher's now uses 'YYYY-MM-DDTHH:MM:SS' (T separator). Lexicographic
+        comparison would treat the space as less than 'T' and fire every reminder
+        immediately; due_reminders must compare as parsed datetimes instead.
+        """
+        # Reminder at 17:40 (space format) checked at 17:31 (T format) — future.
+        self.store.create_reminder("conv-due", "user-due", None, "meeting with Chan", "2026-08-16 17:40")
+        due = self.store.due_reminders(now="2026-08-16T17:31:39")
+        self.assertEqual(len(due), 0)
+
+    def test_future_reminder_due_after_time(self):
+        """The same future reminder becomes due once its time arrives."""
+        self.store.create_reminder("conv-due2", "user-due2", None, "meeting with Chan", "2026-08-16 17:40")
+        due = self.store.due_reminders(now="2026-08-16T17:41:00")
+        self.assertEqual(len(due), 1)
+        self.assertEqual(due[0]["title"], "meeting with Chan")
+
+    def test_reminder_postpone_creates_new_when_missing(self):
+        """Postponing a reminder whose active version no longer exists (e.g. it
+        already fired) must create a new reminder at the requested time instead of
+        reporting 'I couldn't find an active reminder for that.'"""
+
+        class PostponeCNN:
+            def complete_json(self, prompt, text, history=None):
+                return {"action": "postpone", "target": "CNN assignment submission",
+                        "remind_at": "2026-08-16 17:28", "needs_clarification": False}
+
+        reminders = ReminderService(PostponeCNN(), self.store)
+        result = reminders.handle("conv-pc", "user-pc", "Remind me about CNN assignment submission at 5:28 pm today", [])
+        self.assertIn("Reminder set", result)
+        self.assertIn("17:28", result)
+        active = self.store.find_reminders("user-pc")
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]["title"], "CNN assignment submission")
+        self.assertEqual(active[0]["remind_at"], "2026-08-16 17:28")
+
     def test_reminder_persistence_across_restart(self):
         reminders = ReminderService(self.llm, self.store)
         self.store.create_item("conv-rem3", "user-rem3", {"title": "ML project", "item_type": "task", "deadline": "2026-08-14"})
