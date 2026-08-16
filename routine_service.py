@@ -29,6 +29,25 @@ Rules:
 - If the user provides partial info (e.g. missing end time), set needs_clarification true and clarify.
 - Never invent details beyond what the user said."""
 
+# Activities the LLM tends to invent even though the user never asked for them.
+# These are filtered out of generated routines unless the user explicitly
+# included them in their defaults or commitments.
+INVENTED_ACTIVITY_PATTERNS = [
+    r"\bbreakfast\b", r"\blunch\b", r"\bdinner\b", r"\bmorning routine\b",
+    r"\bfree time\b", r"\brelaxation\b", r"\bentertainment\b", r"\bmeal\b",
+    r"\bbrunch\b", r"\bsnack\b", r"\btea\b", r"\bcoffee break\b",
+    r"\bwake up\b", r"\bget ready\b", r"\bpersonal care\b", r"\bself care\b",
+    r"\bmeditation\b", r"\breading\b", r"\bwatch tv\b", r"\bwatch television\b",
+    r"\bsocial media\b", r"\bscrolling\b", r"\bchores\b", r"\bhousework\b",
+    r"\bcleaning\b", r"\bstudy break\b", r"\brest\b", r"\bsleep\b",
+    r"\bnap\b", r"\bwind down\b", r"\bunwind\b", r"\bexercise\b", r"\bworkout\b",
+    r"\bget up\b", r"\bgo to bed\b", r"\bprepare\b", r"\bpreparation\b",
+    r"\bpersonal hygiene\b", r"\bshower\b", r"\bdressing\b", r"\bcommute\b",
+    r"\btravel\b", r"\btransport\b", r"\bphone time\b", r"\bscreen time\b",
+    r"\bplay\b", r"\bgames\b", r"\bgaming\b", r"\bhobby\b", r"\bhobbies\b",
+    r"\bleisure\b", r"\bweekend\b", r"\bholiday\b", r"\bvacation\b",
+]
+
 
 class RoutineService:
     def __init__(self, llm: FeatherlessLLM, store: StudentPilotStore) -> None:
@@ -43,11 +62,17 @@ class RoutineService:
         if self._is_defaults_request(text):
             return self._handle_defaults(conversation_id, user_id, text, history)
 
-        # 3. Add-to-today's-routine request
+        # 3. Delete/clear routine request (must come before add-to-today and
+        #    standard routine requests so "delete all tasks from today's routine"
+        #    is not misrouted to a routine display).
+        if self._is_delete_routine_request(text):
+            return self._handle_delete_routine(user_id, text)
+
+        # 4. Add-to-today's-routine request
         if self._is_add_to_today_request(text):
             return self._handle_add_to_today(conversation_id, user_id, text, history)
 
-        # 4. Standard routine request (tomorrow / today)
+        # 5. Standard routine request (tomorrow / today)
         if self._is_routine_request(text):
             return self._handle_routine_request(conversation_id, user_id, text, history)
 
@@ -85,6 +110,24 @@ class RoutineService:
         )
 
     @staticmethod
+    def _is_delete_routine_request(text: str) -> bool:
+        """Detect requests to delete/clear/remove tasks from a routine."""
+        lower = text.lower()
+        # Must contain a delete/remove/clear verb AND reference routine/schedule.
+        has_delete_verb = any(verb in lower for verb in ("delete", "remove", "clear", "erase", "wipe"))
+        has_routine_ref = any(ref in lower for ref in ("routine", "schedule", "tasks in", "tasks written"))
+        if not (has_delete_verb and has_routine_ref):
+            return False
+        # "delete all tasks from today's routine", "remove everything from my routine",
+        # "clear my routine", "delete all the tasks written in today's routine"
+        if any(phrase in lower for phrase in ("all", "everything", "every", "all the")):
+            return True
+        # "delete the routine", "remove the routine", "clear the routine"
+        if re.search(r"\b(delete|remove|clear|erase|wipe)\b.*\b(routine|schedule)\b", lower):
+            return True
+        return False
+
+    @staticmethod
     def _is_routine_request(text: str) -> bool:
         lower = text.lower()
         markers = ("plan my tomorrow", "routine for tomorrow", "tomorrow's routine", "my schedule for tomorrow",
@@ -118,13 +161,23 @@ class RoutineService:
 
     @staticmethod
     def _parse_time(text: str) -> str | None:
-        """Extract HH:MM from text like '4am', '4:30 pm', '11 pm', '23:00'."""
+        """Extract HH:MM from text like '4am', '4:30 pm', '11 pm', '23:00'.
+
+        Handles 12-hour clock correctly: "12:47 am" → "00:47", "12:47 pm" → "12:47".
+        """
         lower = text.lower()
-        m = re.search(r"\b(\d{1,2}):(\d{2})\b", lower)
+        # First try HH:MM with optional am/pm suffix (e.g. "12:47 am", "4:30 pm", "23:00").
+        m = re.search(r"\b(\d{1,2}):(\d{2})\s*(am|pm)?\b", lower)
         if m:
             hour, minute = int(m.group(1)), int(m.group(2))
+            suffix = m.group(3)
+            if suffix == "pm" and hour < 12:
+                hour += 12
+            if suffix == "am" and hour == 12:
+                hour = 0
             if 0 <= hour <= 23 and 0 <= minute <= 59:
                 return f"{hour:02d}:{minute:02d}"
+        # Then try bare hour with am/pm (e.g. "4am", "11 pm").
         m = re.search(r"\b(\d{1,2})\s*(am|pm)\b", lower)
         if m:
             hour = int(m.group(1))
@@ -178,6 +231,35 @@ class RoutineService:
         self._store.mark_routine_defaults_asked(user_id)
         return "Saved your daily default routine:\n" + "\n".join(created) if created else "I couldn't parse that. Tell me like: \"I go to college from 9 to 5 every weekday.\""
 
+    # ── Delete routine handling ─────────────────────────────────────────────
+
+    def _handle_delete_routine(self, user_id: str, text: str) -> str:
+        """Delete/clear the routine for the requested day (defaults to today)."""
+        lower = text.lower()
+        # Determine which day's routine to clear.
+        if "tomorrow" in lower:
+            target_date = date.today() + timedelta(days=1)
+        else:
+            target_date = date.today()
+        target_str = target_date.isoformat()
+
+        # Clear the cached daily routine.
+        self._store.delete_daily_routine(user_id, target_str)
+
+        # Also clear any planner items that are part of that day's routine,
+        # since the user asked to delete the tasks written in the routine.
+        items = self._store.find_items_on(user_id, target_str)
+        deleted_count = 0
+        for item in items:
+            self._store.delete_items(user_id, item["title"])
+            deleted_count += 1
+
+        if deleted_count:
+            return (f"Deleted {deleted_count} task(s) from your routine for "
+                    f"{target_str} ({target_date.strftime('%A')}).")
+        return (f"Cleared your routine for {target_str} ({target_date.strftime('%A')}). "
+                "No tasks were stored for that day.")
+
     # ── Add to today's routine ──────────────────────────────────────────────
 
     def _handle_add_to_today(self, conversation_id: str, user_id: str, text: str, history) -> str | None:
@@ -199,6 +281,8 @@ class RoutineService:
         blocks = result.get("blocks")
         if not isinstance(blocks, list) or not blocks:
             return "I couldn't update today's routine. Please try again."
+        # Filter out invented activities the user never specified.
+        blocks = self._filter_invented_blocks(blocks, user_id, today_str)
         self._store.save_daily_routine(user_id, today_str, blocks)
         return self._format(blocks, title=f"Updated routine for today ({today_str}):")
 
@@ -220,6 +304,8 @@ class RoutineService:
             return (f"You have nothing scheduled on {target_str} ({target_date.strftime('%A')}). "
                     "No default routine or tasks are set for this day. "
                     'To set your daily default routine, tell me e.g. "I go to college from 9 to 5 every weekday."')
+        # Filter out invented activities even from cached routines.
+        blocks = self._filter_invented_blocks(blocks, user_id, target_str)
         self._store.save_daily_routine(user_id, target_str, blocks)
         title = f"Your routine for {target_str} ({target_date.strftime('%A')}):"
         return self._format(blocks, title=title)
@@ -228,6 +314,8 @@ class RoutineService:
         """Public wrapper to generate (or fetch) the routine blocks for a given date."""
         blocks = self._store.get_daily_routine(user_id, target_str)
         if blocks is not None:
+            # Filter out invented activities even from cached routines.
+            blocks = self._filter_invented_blocks(blocks, user_id, target_str)
             return blocks
         generated = self._generate_blocks(user_id, target_str, [], include_defaults=include_defaults)
         if generated:
@@ -259,7 +347,44 @@ class RoutineService:
         blocks = result.get("blocks")
         if not isinstance(blocks, list) or not blocks:
             return None
+        # Filter out invented activities the user never specified.
+        blocks = self._filter_invented_blocks(blocks, user_id, target_str)
         return blocks
+
+    def _filter_invented_blocks(self, blocks: list[dict[str, Any]], user_id: str, target_str: str) -> list[dict[str, Any]]:
+        """Remove blocks whose activity matches an invented pattern unless the
+        user explicitly included that activity in their defaults or commitments."""
+        target_date = date.fromisoformat(target_str)
+        commitments = [dict(item) for item in self._store.find_items_on(user_id, target_str)]
+        defaults = self._store.find_routine_defaults(user_id, target_date.weekday())
+
+        # Build a set of known activity keywords from the user's own data.
+        known_activities = set()
+        for item in commitments:
+            title = item.get("title", "").lower()
+            known_activities.add(title)
+            for word in re.findall(r"[a-z]+", title):
+                if len(word) > 2:
+                    known_activities.add(word)
+        for item in defaults:
+            activity = item.get("activity", "").lower()
+            known_activities.add(activity)
+            for word in re.findall(r"[a-z]+", activity):
+                if len(word) > 2:
+                    known_activities.add(word)
+
+        filtered = []
+        for block in blocks:
+            activity = block.get("activity", "")
+            activity_lower = activity.lower()
+            is_invented = any(re.search(pattern, activity_lower) for pattern in INVENTED_ACTIVITY_PATTERNS)
+            if not is_invented:
+                filtered.append(block)
+                continue
+            activity_words = set(re.findall(r"[a-z]+", activity_lower))
+            if activity_words & known_activities:
+                filtered.append(block)
+        return filtered
 
     @staticmethod
     def _build_prompt(text: str, commitments: list[dict[str, Any]], defaults: list[dict[str, Any]] | None = None) -> str:

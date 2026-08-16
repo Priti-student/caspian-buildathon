@@ -615,6 +615,14 @@ class StudentPilotStore:
         except (ValueError, TypeError):
             return None
 
+    def delete_daily_routine(self, user_id: str, routine_date: str) -> None:
+        """Delete the persisted daily routine for a user/date (if any)."""
+        with self._connection() as connection:
+            connection.execute(
+                "DELETE FROM daily_routines WHERE user_id=? AND routine_date=?",
+                (user_id, routine_date),
+            )
+
     @staticmethod
     def _now() -> str:
         return datetime.now().isoformat(timespec="seconds")

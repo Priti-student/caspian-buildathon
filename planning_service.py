@@ -54,13 +54,20 @@ class PlanningService:
             if not pending:
                 return "You have no pending tasks or events to mark as complete."
             if isinstance(target, str) and target.strip():
+                # Find the items that match the target so we can invalidate
+                # their cached routines.
+                matched = [item for item in pending if target.lower() in item["title"].lower()]
                 count = self._store.update_items(user_id, target, {"status": "completed"})
-                return "Marked as completed." if count else "I couldn't find that task or event."
+                if count:
+                    self._invalidate_routines_for_items(user_id, matched)
+                    return "Marked as completed."
+                return "I couldn't find that task or event."
             # The user said they completed their work but didn't name a task.
             # Complete all pending items (the natural interpretation of a blanket
             # "I'm done" that must be removed from the pending list).
             for item in pending:
                 self._store.update_items(user_id, item["title"], {"status": "completed"})
+            self._invalidate_routines_for_items(user_id, pending)
             return "Marked as completed: " + "; ".join(item["title"] for item in pending) + "."
         if action == "delete":
             # "delete all my tasks", "delete everything", "start fresh" → delete all pending
@@ -72,9 +79,15 @@ class PlanningService:
                     return "You have no pending tasks or events to delete."
                 for item in pending:
                     self._store.delete_items(user_id, item["title"])
+                self._invalidate_routines_for_items(user_id, pending)
                 return "Deleted all pending tasks and events."
+            # Find matching items before deletion so we can invalidate routines.
+            matched = [item for item in self._store.find_items(user_id) if target.lower() in item["title"].lower()]
             count = self._store.delete_items(user_id, target)
-            return "Deleted." if count else "I couldn't find that task or event."
+            if count:
+                self._invalidate_routines_for_items(user_id, matched)
+                return "Deleted."
+            return "I couldn't find that task or event."
         if not isinstance(target, str) or not target.strip():
             return "Which task or event do you mean?"
         if action == "query":
@@ -84,6 +97,17 @@ class PlanningService:
             count = self._store.update_items(user_id, target, updates)
             return "Updated." if count else "I couldn't find that task or event."
         return None
+
+    def _invalidate_routines_for_items(self, user_id: str, items: list[dict[str, Any]]) -> None:
+        """When a task/event is completed or deleted, invalidate the cached
+        daily routine for any date that item was scheduled on, so the next
+        routine request regenerates without the completed item."""
+        for item in items:
+            # The item may have an event_date or a deadline.
+            for date_field in ("event_date", "deadline"):
+                date_str = item.get(date_field)
+                if date_str:
+                    self._store.delete_daily_routine(user_id, date_str)
 
     @staticmethod
     def _clean_item(item: dict[str, Any], source_text: str) -> dict[str, Any] | None:
